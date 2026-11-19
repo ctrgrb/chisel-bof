@@ -72,12 +72,17 @@ Worth knowing before patching anything in the pump:
 - **`SO_RCVTIMEO`/`SO_SNDTIMEO` are installed per phase and cleared before the pump**
   (`sock_timeo(fd, 0)` right before `ws_set_nb()`). Left in place, every idle second in the
   `select`-driven pump would surface as `WSAETIMEDOUT` and look like a dead tunnel.
-- **The packed argument list is never truncated.** `pe_args` must consume every `z` record; more
+- **The packed argument list is never truncated.** `pe_args` must consume every record; more
   than `PE_MAXARG` (24) records returns 6 and `stock_run` never starts. Each flag is two records,
   so a dropped tail means the image runs on defaults while the operator believes otherwise: this
   happened with a cap of 8 and showed up as `SO_RCVTIMEO` measured installed at 45000 ms — the
   default — on a stalled handshake whose command line said `--ws-timeout 3s`. Check the boundary
-  (24 records → the server logs `Open`; 26 and 44 → no connection at all).
+  (24 records → the server logs `Open`; 26 and 44 → no connection at all). Records are copied **by
+  length, never by NUL** (a `b`-type record has no terminator, and a `z` record missing one must
+  not eat the next record), and `flagis` matches flag names **with or without leading dashes** —
+  positional C2 parsers (`exec_bof <types><args>`) claim any dashed token for their own options, so
+  the dash-free spelling is the only one that can arrive. `tests/packedargs.py` asserts all of this
+  against `go()`'s return code with no network involved.
 - The reconnect attempt counter is **reset once a session has stayed up more than 5 s** (the same
   rule as upstream's `connected = time.Since(t0) > 5*time.Second`), so `--max-retry-count` bounds
   a *failed dial burst*, not the lifetime of a working proxy. Backoff waits must sleep in bounded

@@ -13,8 +13,8 @@ the official 1.12.0 binary, both directly and behind a public TLS front-end (see
 Nothing binary is committed here: `build.bat` builds everything from source, including the
 crypto static library (hash-verified fetch of Mbed TLS 3.6.7). The prebuilt payload lives on
 the **[latest release](https://github.com/ctrgrb/chisel-bof/releases/latest)** — currently
-`v1.12.1-bof`, asset `chiselbof.dll`, 21,401,088 bytes,
-`sha256 5ab479ebd56e280e190929ca196853464f82f85c3f97f1a8356356dcfcf45b42` (also in the
+`v1.12.1-bof`, asset `chiselbof.dll`, 21,402,112 bytes,
+`sha256 a0fb0ee93ac07e7d5a1a6cedef0f6b856bdaeba8c906fb4fd9fc8fd717138abb` (also in the
 `SHA256SUMS.txt` asset). Your own rebuild will **not** hash-match it: the PE timestamp and
 the absolute `__FILE__` paths that Mbed TLS's debug build embeds depend on where the
 dependency was unpacked. Check the shape instead — imports `ws2_32.dll` (13 winsock names) +
@@ -105,6 +105,16 @@ syntax — `500ms`, `30s`, `5m`, `1h` (a bare number means seconds, which `chise
 rejects). Names and defaults match the Go client's flags/env, so a working `chisel client`
 command line transfers over unchanged.
 
+**Leading dashes are optional.** `auth`, `-auth` and `--auth` are the same flag (the name after
+the dashes must match exactly — `authx` matches nothing). That is not sugar: OST's
+`exec_bof <types><args>` is a positional parser that hands any token starting with `-` to its
+own option parser, so a dashed flag can never reach the packed argument buffer there —
+`unrecognized arguments: --auth`. The form that works in OST is:
+
+```
+exec_bof zzzzzz https://chisel.example.com R:1080:socks auth ops:pass keepalive 30s ping-timeout 10s
+```
+
 | flag | default | what it does (upstream equivalent) |
 |---|---|---|
 | `--auth <user>:<pass>` | none | Authenticates to the server. Split at the **first** colon, so the password may contain colons. This is chisel's SSH-level auth: the payload sends `USERAUTH_REQUEST` method `password` (after a `none` probe) and the server checks it in `PasswordCallback` (`server/server.go:authUser`), which is also how `--authfile` per-user address allow-lists are keyed. A rejected credential ends the session and the client retries with backoff — the server logs `Login failed for user "<name>"`. |
@@ -129,13 +139,16 @@ The payload's own knobs, not chisel's: `--port <p>` (server port, if the URL has
 `--ver <string>` (version reported in the `config` request), `--hv <n>` (KEX version-string
 shape, for handshake experiments).
 
-The BOF-PE entry unpacks at most **24** `z` records (URL + remotes + flags), and a longer list
-makes `go()` return 6 **without running anything** — it does not truncate. That matters with the
-flags above: a truncated list would drop `--auth` or the timeouts while the proxy still appeared
-to work, which is exactly the failure this used to have (`SO_RCVTIMEO` measured installed at the
-45 s default while the command line said `3s`, because the flag sat past the old 8-record cap).
-The twin build (`-DTWIN_MAIN`, command in [docs/build-problems.md](docs/build-problems.md)) takes
-real `argv`, so it never hits the limit — which is why this bug only ever showed in the DLL.
+The BOF-PE entry unpacks at most **24** length-prefixed argument records (`z`, and `b` too —
+records are copied by length, not by NUL), URL + remotes + flags, and a longer list makes `go()`
+return 6 **without running anything** — it does not truncate. That matters with the flags above: a
+truncated list would drop `auth` or the timeouts while the proxy still appeared to work, which is
+exactly the failure this used to have (`SO_RCVTIMEO` measured installed at the 45 s default while
+the command line said `3s`, because the flag sat past the old 8-record cap). `tests/packedargs.py`
+drives `go()` with hand-built buffers — both header forms, `z` and `b` records, the cap boundary —
+and asserts on the return code (1 = flags parsed and the dial budget ran out, 6 = refused, 7 = bad
+duration). The twin build (`-DTWIN_MAIN`, command in [docs/build-problems.md](docs/build-problems.md))
+takes real `argv`, so it never hits the limit — which is why this bug only ever showed in the DLL.
 
 To *see* what these knobs are doing — the `ping`/`pong` cadence, which phase timed out, which
 methods the server would accept — build the console twin or a `DIAG_MARK` build:

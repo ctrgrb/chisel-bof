@@ -167,3 +167,28 @@ despite `--ws-timeout 3s` on the command line.
 path stays unusable until the *server's* own pings expire it (~125 s). A keepalive-free build
 passes every other suite in this folder and still loses the connection silently in the field —
 which is the reason this test exists.
+
+## 6. Packed-argument contract (the C2 surface, no network needed)
+
+```
+python tests\packedargs.py build\chiselbof.dll
+```
+
+`packedargs.py` calls the DLL export `go(args, len)` through `ctypes` with hand-built argument
+buffers and asserts on the return code — the only observable an offline test has, and enough to
+pin the whole unpacker:
+
+| record layout | expected |
+|---|---|
+| Cobalt-Strike header form (`u32` = size of remainder), `z` records, dash-free flag names | `1` in ~1 s (the dial budget ran out, so the flags were applied) |
+| Outflank header form (`u32` = total incl. header) | `1` |
+| `b` records for the flag tokens (length-prefixed, **no** NUL inside) | `1` — a NUL-driven copy would mis-parse and hang on unlimited retries |
+| 24 records (at the cap) | runs: `1` |
+| 26 records (over the cap) | `6` immediately, and **no** connection to the port at all |
+| `keepalive 99zz` | `7` — the dash-free name reached the duration parser |
+
+Every flag in sections 4 and 5 can be spelled **without its leading dashes** (`auth u:p`,
+`keepalive 3s`, `max-retry-count 1`): positional C2 argument parsers (`exec_bof <types><args>`)
+claim any token that starts with `-`, so the dashed spelling cannot always be delivered. Run the
+dashed and dash-free forms once each — a build whose parser strips dashes on the argument side
+only would accept neither.
