@@ -52,7 +52,61 @@ build.bat clean
 
 The build **fails loudly**: it deletes every intermediate first (a failed compile left
 a stale `.o` behind once, and the link silently produced a fresh-timestamped DLL
-running old code), then checks `build/build.log` for error lines.
+running old code), then checks `build/build.log` for error lines — and if a running
+test client still has `build/chiselpe.dll` mapped, the delete fails quietly and the
+stale file would be relinked, so the script now stops with `OUTPUT LOCKED` instead.
+
+### Toolchain
+
+Tested: mingw-w64 **x86_64** 8.1.0 (msvcrt runtime, the toolchain this client was
+developed on) and, from a clean folder, **winlibs GCC 16.2.0 posix-seh / UCRT
+(mingw-w64 14.0.0 r3)** — that build produces 0 warnings and 0 errors, links with
+`--no-undefined`, imports exactly `ws2_32.dll` + `KERNEL32.dll`, passes the same
+relocation audit (581/581 in-image) and passes the whole test suite in `tests/`
+(socks fetch, 6-stream slow-consumer soak, SOCKS5 UDP, wedged-target pair). Nothing
+else here is toolchain-specific, but the build **pins compiler behaviour** a
+`-nostdlib` payload depends on, because distro gcc specs (MSYS2 in particular) differ:
+
+| flag group | why it is pinned |
+|---|---|
+| `-Werror=implicit-function-declaration -Werror=implicit-int -Werror=int-conversion -Werror=incompatible-pointer-types -Werror=discarded-qualifiers` | these diagnostics are **errors by default in GCC ≥ 14** and only warnings on older gcc. Pinning them makes "it compiled here" mean "it compiles on a modern box" instead of failing there with a wall of `implicit declaration of …`. An earlier revision of this client relied on implicit declarations for its `snprintf` replacements and did exactly that. |
+| `-fno-stack-protector -U_FORTIFY_SOURCE` | a stack protector and fortified libc calls reference `__stack_chk_fail` / `__stack_chk_guard` / `__chk_fail`, which exist only in a C runtime we deliberately do not link. |
+| `-fno-pic -fno-pie` — **compile side only** | codegen must stay absolute/non-PIE: that is the image shape the relocation audit below checks (587/587). **Never pass `-no-pie` to the link**: for this `-shared -nostdlib` image it produces a DLL the Windows loader refuses to initialise — `LoadLibrary` then fails with `1114` (`ERROR_DLL_INIT_FAILED`) and gives no other clue. Verified both ways on this tree. |
+| `-Wl,--no-undefined` | the payload must import nothing but `ws2_32` + `kernel32`. With `-nostdlib`, a stray libc reference (a `memcpy`/`printf` the compiler decided to call out-of-line, a library file that suddenly matters) would otherwise link into a DLL whose calls jump into garbage at run time. It has to be a link error. |
+| `-fno-tree-loop-distribute-patterns` | `src/crypto.c` **defines** `memcpy`, `memset`, `memmove`, `memcmp`, `strlen`, `strcmp`, `strchr` (no CRT to borrow them from), and their bodies are byte loops. GCC ≥ 12 runs the loop-idiom pass at **-O2**, so it rewrites those bodies into calls to the very functions being defined: infinite self-recursion. Strip this flag and the payload *builds clean*, then hangs before the first `connect()` — silently, because the self-call is a tail call, so the stack never overflows. 8.1.0 only ran that pass at `-O3`, which is why this box never hit it. |
+
+If your gcc **specs** re-inject options after the command line (some MSYS2 builds
+re-add `-D_FORTIFY_SOURCE` or a stack protector, which the `-nostdlib` link then
+rejects with `undefined reference to __stack_chk_fail`), append your own flags without
+editing the scripts:
+
+```
+set EXTRA_CFLAGS=-D_FORTIFY_SOURCE=0 && build.bat
+```
+
+`tools/build-deps.bat` also **skips `library/platform.c` on purpose**: `platform.h`
+force-defines `MBEDTLS_PLATFORM_HAS_NON_CONFORMING_{SN,VSN}PRINTF` for every
+`__MINGW32__` build, so that file would compile win32 `snprintf` shims that reference
+UCRT `vsnprintf_s`. Nothing in this client references those shims (checked with `nm`
+over the whole object set — `calloc`/`free`/`printf`/`snprintf` are all overridden by
+macros), so the file is left out rather than declaring a prototype for a function we
+never implement.
+
+### Build problems
+
+| symptom | cause, and the fix that is now in the tree |
+|---|---|
+| wall of `implicit declaration of function 'mbed_vsnprintf_impl'` / `mbed_snprintf_impl` / `printf` / `vsnprintf_s` | older copy of this folder. `MBEDTLS_PLATFORM_NO_STD_FUNCTIONS` suppresses `platform.h`'s `#include <stdio.h>`, so the `snprintf`/`printf` replacements the payload needs arrived **undeclared** — warnings on GCC 8, hard errors on GCC 14. `deps/mbedinc/mbedtls/mbedtls_config.h` now declares *and* overrides all four entry points (`MBEDTLS_PLATFORM_{SN,VSN,}PRINTF_MACRO` + `FPRINTF`), and `src/mbedfmt.c` provides them, so the library never references a libc symbol and no libc name is defined by us either. |
+| `undefined reference to __stack_chk_fail` / `__chk_fail` at link | distro spec re-injects fortify/protector after our flags → pass them through `EXTRA_CFLAGS` (above). |
+| DLL loads with `1114` | `-no-pie` added to the link line → remove it (compile-side pin only). |
+| `OUTPUT LOCKED: build\chiselpe.dll is still loaded by a running process` | a test client still holds the DLL mapped; stop it. Without this guard the delete fails silently and a stale DLL gets relinked with a fresh timestamp. |
+| `MBED.a ARCHIVE FAILED` with an empty `build/mbedlog.txt` | one `ar` invocation carrying ~110 quoted absolute paths exceeded cmd's 8191-character command line; archiving is batched (24 objects per call). |
+| stray directories named `..deps` / `..build` next to `build.bat` | `%~dp0..` was being resolved by string concatenation; the root is now canonicalised (`for %%I in ("%~dp0..") do set ROOT=%%~fI\`). |
+| `SHA256 MISMATCH: got … expected …` | the file in `deps/` is not the v3.6.7 release tarball. Delete it and re-fetch, or download the pinned URL by hand, verify the hash, unpack so that `deps/mbedtls-3.6.7/library/` exists, then re-run. |
+| `undefined reference to __imp_inet_pton` at link (UCRT toolchains only; the same sources link fine on the old msvcrt box) | `library/x509_crt.c` chooses the platform `inet_pton` or its own software copy on `_WIN32_WINNT >= 0x0600`. Old mingw defaults below that, UCRT defaults to Win10 — so the *same* sources ask for a libc symbol on one toolchain and not the other. Pinned to the software path with upstream's own bypass, `#define MBEDTLS_TEST_SW_INET_PTON`, in our config: same symbol set on every toolchain. It only affects X.509 name-constraint IP-prefix checks, which this client never uses. |
+| `warning: "PSA_WANT_ECC_SECP_R1_256" redefined` (×14 per library TU) | our config wrote bare `#define PSA_WANT_…`, colliding with upstream's `config_adjust_psa_{from,superset}_legacy.h`, which defines the same macros to `1`. Every `PSA_WANT_*` in our config is now written `#define PSA_WANT_X 1`. No behaviour change — it just stops the warnings from burying real ones. |
+| the `-Werror=` pins above seem to do nothing; bad code compiles | the compile lines used to carry `-w`. `-w` suppresses diagnostics **before** `-Werror=` can promote them, so on a pre-GCC-14 toolchain the pins were decorative — and it was hiding two genuine bugs in `src/stock.c`: `select()` used with no declaration anywhere (now declared with the other winsock externs) and `mbedtls_ssl_session_free(&ctx)` called on an `mbedtls_ssl_context *` where an `mbedtls_ssl_session *` was expected (deleted — this client has no session object; `mbedtls_ssl_free()` already releases `ssl->session` and `ssl->session_negotiate`). `-w` is gone from both scripts; on a modern toolchain those two were hard errors. |
+| builds clean on a modern toolchain, then **never reaches the server**: no server-side log line, socks port never bound, client prints nothing and never exits | `-fno-tree-loop-distribute-patterns` stripped (see flag table): the compiler rewrote the byte loops inside our own `memcpy`/`memset`/`strlen` into calls to those same functions, so the client self-recurses before the first `connect()`. Attach a debugger to the hung process — the main thread sits in `memset` with one frame. |
 
 ## The crypto dependency (`deps/MBED.a`)
 
