@@ -464,7 +464,16 @@ static int inum(const char *s){ int neg=0,v=0; if(*s=='-'){ neg=1; s++; } else i
 /* monotonic milliseconds: GetTickCount64 is the only KERNEL32 import this image has, and it
  * is what the RNG reseeds from; every timeout in this file is measured against it. */
 static unsigned long long now_ms(void){ extern unsigned long long GetTickCount64(void); return GetTickCount64(); }
-static int flagis(const char *k, const char *f){ int i=0; for(;;){ if(k[i]!=f[i]) return 0; if(!k[i]) return 1; i++; } }
+/* Exact match of an argument against a flag name, ignoring LEADING DASHES: "--auth",
+   "-auth" and "auth" are the same flag.  Not cosmetic - OST's `exec_bof <types><args>`
+   is argparse-style, so any token beginning with a dash is consumed by its own option
+   parser and can never become a packed record ("unrecognized arguments: --auth").  The
+   dash-free spelling is therefore the only form that reaches this payload from OST:
+     exec_bof zzzz auth ops:pass https://chisel.example.com R:1080:socks
+   The rest of the name must still match exactly, so "authx" is not "auth", and values
+   are unaffected (a flag's own argument is consumed by name, so "-1" for
+   --max-retry-count is never tested here). */
+static int flagis(const char *k, const char *f){ while(*k=='-') k++; while(*f=='-') f++; int i=0; for(;;){ if(k[i]!=f[i]) return 0; if(!k[i]) return 1; i++; } }
 
 /* ---- chisel-style durations ---- */
 /* "<int>[ms|s|m|h]" -> milliseconds.  Go's time.ParseDuration needs a unit and allows
@@ -865,10 +874,14 @@ int main(int argc, char **argv){ return stock_run(argc, argv); }
    form is accepted only when its u32 equals len-4 (CS) or len (Outflank), and the
    record walk must consume the buffer exactly, so the forms cannot collide once
    there are two or more records.
-   Chisel's client takes two
-   strings (URL, remote) so the C2 format is "zz"; the format string is not in
-   the buffer, so only 'z' records are representable.  Returns 6 for
-   malformed packed args (on top of stock_run's own 1..5 codes). */
+   Chisel's client takes two strings (URL, remote) so the C2 format string is "zz"; one
+   'z' per argument, and OST-style CLIs (`exec_bof <types><args>`) take types and values
+   positionally - which is why they cannot carry a dash-prefixed flag: their option parser
+   claims "--auth" first.  The buffer holds length-prefixed records only (the format
+   string never reaches this payload), so 'z' and 'b' records are indistinguishable here
+   and both are accepted; dash-free flag names are accepted for that reason (see flagis).
+   Returns 6 for malformed or over-long packed args (on top of stock_run's own 1..5 codes
+   and 7 for a bad flag value). */
 /* 24: the URL, a few remotes, and the full chisel flag surface (10 flags = 20 strings) have to
    fit.  This used to be 8, and a packed argument list longer than the cap used to be truncated
    SILENTLY - everything after the 8th string vanished, so `--ws-timeout`/`--ssh-timeout`/retry
@@ -895,7 +908,12 @@ static int pe_args(const unsigned char *b, int len, int use_hdr)
     while(n<PE_MAXARG&&len>=4){
         l=(int)pe_ld32(b); b+=4; len-=4;
         if(l<=0||l>len) return -1;
-        cparg(pe_argbuf[n], (const char*)b, PE_ARGMAX);
+        /* Length-driven copy, never NUL-driven: a `z` record carries its own NUL inside
+           `l`, a `b` (raw bytes) record does not, and a `z` record with the NUL missing
+           must not read into the following record.  The terminator is added here. */
+        { int m = (l < PE_ARGMAX-1) ? l : PE_ARGMAX-1, i2;
+          for(i2=0;i2<m;i2++) pe_argbuf[n][i2]=(char)b[i2];
+          pe_argbuf[n][m]=0; }
         pe_argv[n]=pe_argbuf[n]; n++;
         b+=l; len-=l;
     }
