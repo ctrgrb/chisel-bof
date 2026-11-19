@@ -25,7 +25,7 @@ python -m http.server 9006 --bind 127.0.0.1
 Terminal 2 (client machine):
 
 ```
-build\pebdrv.exe build\chiselpe.dll https://127.0.0.1:8406 "R:9054:127.0.0.1:9053/udp" "R:1543:socks"
+build\pebdrv.exe build\chiselbof.dll https://127.0.0.1:8406 "R:9054:127.0.0.1:9053/udp" "R:1543:socks"
 ```
 
 Terminal 3 — expect `UDP-TEST PASS`:
@@ -50,7 +50,7 @@ Fast-consumer tests (`curl`) do **not** catch this class of bug.
 # client machine
 python tests\mkpayload.py 6291456          # writes tests\pub\big.bin, prints its sha256
 python -m http.server 19101 --directory tests\pub
-build\pebdrv.exe build\chiselpe.dll https://127.0.0.1:8406 "R:1080:socks"
+build\pebdrv.exe build\chiselbof.dll https://127.0.0.1:8406 "R:1080:socks"
 
 # server machine
 python tests\slowapp.py 1080 6                        # 6 streams, payload size/sha auto

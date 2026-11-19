@@ -1,5 +1,5 @@
 @echo off
-rem build.bat - build chiselpe.dll: a bare x64 BOF-PE DLL implementing the
+rem build.bat - build chiselbof.dll: a bare x64 BOF-PE DLL implementing the
 rem jpillora/chisel client (v1.12.1 wire, chisel-v3) with no CRT.
 rem
 rem Requires mingw-w64 x86_64 (tested: 8.1.0). Override with:
@@ -36,17 +36,17 @@ rem Remove every intermediate and output first: a failed compile leaves the
 rem previous .o/.dll in place, and the `if not exist` checks below would then
 rem pass and LINK A STALE OBJECT - the DLL is relinked (fresh timestamp, old
 rem code) and the only clue is a WARNING line.  Seen twice; never again.
-del /q "%ROOT%build\chiselpe.o"     2>nul
+del /q "%ROOT%build\chiselbof.o"     2>nul
 del /q "%ROOT%build\obj_crypto.o"   2>nul
 del /q "%ROOT%build\obj_x25519.o"   2>nul
-del /q "%ROOT%build\chiselpe.dll"   2>nul
+del /q "%ROOT%build\chiselbof.dll"   2>nul
 del /q "%ROOT%build\pebdrv.exe"     2>nul
 rem The `del` above is best-effort: if a running process still has the DLL mapped
 rem (a test client, an explorer thumbnail, an AV scan) the delete FAILS quietly, the
 rem `if not exist` guards below then PASS on the stale file, and ld cannot overwrite
 rem it either ("cannot open output file ... Permission denied") - which is how a
 rem stale-but-fresh-timestamped DLL got shipped twice.  Fail loudly instead.
-if exist "%ROOT%build\chiselpe.dll" echo OUTPUT LOCKED: build\chiselpe.dll is still loaded by a running process - stop the test client first & exit /b 9
+if exist "%ROOT%build\chiselbof.dll" echo OUTPUT LOCKED: build\chiselbof.dll is still loaded by a running process - stop the test client first & exit /b 9
 if exist "%ROOT%build\pebdrv.exe"   echo OUTPUT LOCKED: build\pebdrv.exe is still running - stop it first & exit /b 9
 
 rem See tools\build-deps.bat: these five diagnostics are errors by default on
@@ -72,8 +72,8 @@ rem which a -nostdlib link rejects).  Append your own flags without editing the
 rem script:  set EXTRA_CFLAGS=-D_FORTIFY_SOURCE=0 && build.bat
 set EXTRA=%EXTRA_CFLAGS%
 
-%RUN% -O2 -std=c11 %PORT% %STRICT% %EXTRA% -DPE_MAIN -I "%ROOT%src" -I "%ROOT%deps\mbedinc" -I "%ROOT%deps\mbedtls-3.6.7\include" -c "%ROOT%src\stock.c" -o "%ROOT%build\chiselpe.o" > "%ROOT%build\build.log" 2>&1
-if not exist "%ROOT%build\chiselpe.o" echo COMPILE FAILED - see build\build.log & exit /b 9
+%RUN% -O2 -std=c11 %PORT% %STRICT% %EXTRA% -DPE_MAIN -I "%ROOT%src" -I "%ROOT%deps\mbedinc" -I "%ROOT%deps\mbedtls-3.6.7\include" -c "%ROOT%src\stock.c" -o "%ROOT%build\chiselbof.o" > "%ROOT%build\build.log" 2>&1
+if not exist "%ROOT%build\chiselbof.o" echo COMPILE FAILED - see build\build.log & exit /b 9
 
 %RUN% -O2 -std=c11 %PORT% %STRICT% %EXTRA% -I "%ROOT%src" -c "%ROOT%src\crypto.c"  -o "%ROOT%build\obj_crypto.o"  >> "%ROOT%build\build.log" 2>&1
 if not exist "%ROOT%build\obj_crypto.o" echo CRYPTO COMPILE FAILED - see build\build.log & exit /b 9
@@ -96,8 +96,8 @@ rem Passed to the link of a -shared -nostdlib image it produces a DLL that the
 rem Windows loader refuses to initialise - LoadLibrary fails with 1114
 rem (ERROR_DLL_INIT_FAILED), with no other clue.  Verified both ways on this
 rem tree: same objects, link with -no-pie -> 1114, without -> loads and runs.
-%RUN% -nostdlib -shared -Wl,--dynamicbase -Wl,--no-undefined "-Wl,--exclude-libs,MBED.a" "-Wl,--strip-all" "%ROOT%build\chiselpe.o" "%ROOT%build\obj_crypto.o" "%ROOT%build\obj_x25519.o" "%ROOT%deps\MBED.a" "%ROOT%deps\chiselpe.def" -lgcc "%ROOT%deps\WS2_32nat.a" -lkernel32 -o "%ROOT%build\chiselpe.dll" >> "%ROOT%build\build.log" 2>&1
-if not exist "%ROOT%build\chiselpe.dll" echo LINK FAILED - see build\build.log & exit /b 9
+%RUN% -nostdlib -shared -Wl,--dynamicbase -Wl,--no-undefined "-Wl,--exclude-libs,MBED.a" "-Wl,--strip-all" "%ROOT%build\chiselbof.o" "%ROOT%build\obj_crypto.o" "%ROOT%build\obj_x25519.o" "%ROOT%deps\MBED.a" "%ROOT%deps\chiselbof.def" -lgcc "%ROOT%deps\WS2_32nat.a" -lkernel32 -o "%ROOT%build\chiselbof.dll" >> "%ROOT%build\build.log" 2>&1
+if not exist "%ROOT%build\chiselbof.dll" echo LINK FAILED - see build\build.log & exit /b 9
 
 rem test driver (normal CRT build, not part of the payload)
 %RUN% -O2 -w "%ROOT%tools\pebdrv.c" -o "%ROOT%build\pebdrv.exe" >> "%ROOT%build\build.log" 2>&1
@@ -105,5 +105,5 @@ if not exist "%ROOT%build\pebdrv.exe" echo DRIVER COMPILE FAILED - see build\bui
 
 findstr /i /c:"error" /c:"undefined" /c:"cannot open" "%ROOT%build\build.log" >nul 2>&1
 if not errorlevel 1 echo WARNING: build.log contains error-like lines & exit /b 8
-echo BUILD OK: build\chiselpe.dll + build\pebdrv.exe
+echo BUILD OK: build\chiselbof.dll + build\pebdrv.exe
 exit /b 0

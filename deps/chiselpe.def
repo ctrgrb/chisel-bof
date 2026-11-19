@@ -1,4 +1,0 @@
-; chiselpe.def - sole DLL export (go) for the BOF-PE payload
-LIBRARY chiselpe
-EXPORTS
- go @1

@@ -6,7 +6,7 @@
    classic CS COFF beacons, which prefix [u32 = size of remainder].
    Every CLI arg after the DLL path is packed as a 'z' string, so the
    argument format is "zz" for <url> <remote>.
-   usage: pebdrv.exe <chiselpe.dll> <url> <remote...>  */
+   usage: pebdrv.exe <chiselbof.dll> <url> <remote...>  */
 #include <stdio.h>
 #include <windows.h>
 
