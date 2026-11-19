@@ -39,6 +39,14 @@ extern int recv(int, char *, int, int);
 extern int closesocket(int);
 extern int ioctlsocket(int, int, const char *, int);
 extern int getsockopt(int, int, int, char *, int *);
+/* winsock select(): we never include <winsock2.h> (the payload binds ws2_32 by
+ * ordinal and includes no CRT/SDK headers), so it must be declared here.  Every
+ * call site passes our own fd_set1/tv1 structs with void* casts, which is exactly
+ * the Microsoft x64 ABI shape (5 args, int return) - but until this line existed
+ * the compiler only had an IMPLICIT declaration for it, which GCC >= 14 rejects
+ * outright (-Werror=implicit-function-declaration) and which silently forbids the
+ * compiler from checking the arguments. */
+extern int select(int, void *, void *, void *, void *);
 
 #define WSA_WOULD_BLOCK 10045   /* winsock EWOULDBLOCK, probed: recv(sd,b,n,flags!=0) -> r=-1 err=10045 */
 
@@ -554,7 +562,12 @@ static int stock_run(int argc, char **argv)
     stage_mark(host);
     if(sess){
         mbedtls_ssl_config_free(&conf);
-        mbedtls_ssl_session_free(&ctx);
+        /* No mbedtls_ssl_session_free here: there is no separate session object in
+         * this client, and this call passed &ctx (an mbedtls_ssl_context) where an
+         * mbedtls_ssl_session was expected - it would read session field offsets out
+         * of a context struct and free those pointers through our arena allocator on
+         * EVERY reconnect (sess>0).  mbedtls_ssl_free() below already releases both
+         * ssl->session and ssl->session_negotiate (library/ssl_tls.c:5660-5671). */
         mbedtls_ssl_free(&ctx);
         /* per-session PSA reinit makes every PSA object disposable: safe to rewind
          * the whole arena (all frees above run before this line). */

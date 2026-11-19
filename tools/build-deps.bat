@@ -52,10 +52,46 @@ rem         load-bearing: a different config means a different MBED.a (and a
 rem         client that cannot parse public CA chains). ----
 del /q "%ROOT%build\mbedobj\*.o" 2>nul
 del /q "%ROOT%build\mbedlog.txt" 2>nul
+rem These five diagnostics became ERRORS by default in gcc 14 (i.e. every current
+rem mingw-w64 / MSYS2 toolchain) while older toolchains only warned.  Pinning them
+rem as errors here is what makes "it compiled on my box" mean something: on a
+rem modern box the same source now fails the same way, rather than stopping the
+rem build with a wall of `implicit declaration of ...`.
+rem Toolchain defaults that must be pinned for a -nostdlib payload: MSYS2 /
+rem current mingw-w64 gcc specs add -fstack-protector-strong and
+rem -D_FORTIFY_SOURCE (references to __stack_chk_fail/__stack_chk_guard/
+rem __chk_fail that only exist in the C runtime -> with -Wl,--no-undefined they
+rem stop the link, and without it they would silently become bogus imports), and
+rem PIE-by-default codegen (this payload relies on the non-PIE/absolute-slot
+rem shape that tools/pehl2dir.py audits, 587/587 in-image).
+rem
+rem There is deliberately NO `-w` here or in build.bat: `-w` suppresses warnings
+rem BEFORE -Werror= promotes them, so with `-w` the pin above is decorative on
+rem toolchains older than gcc 14 (it did hide exactly that: an undeclared winsock
+rem select() and a wrong-pointer call in our own sources, both invisible here and
+rem hard errors there).  Upstream Mbed TLS and our sources compile warning-free
+rem with these flags; preprocessor noise is fixed at the source (see the
+rem PSA_WANT_* note in deps\mbedinc\mbedtls\mbedtls_config.h), not silenced.
+rem (-Wno-cpp does NOT suppress macro-redefinition warnings on older gcc; only
+rem -Wp,-w does, and it would also hide genuine config mistakes.)
+set PORT=-fno-stack-protector -fno-pic -fno-pie -U_FORTIFY_SOURCE -fno-tree-loop-distribute-patterns
+set STRICT=-Werror=implicit-function-declaration -Werror=implicit-int -Werror=int-conversion -Werror=incompatible-pointer-types -Werror=discarded-qualifiers
+rem See build.bat: EXTRA_CFLAGS appends your own flags (e.g. a spec re-injected
+rem -D_FORTIFY_SOURCE) without editing this script.
+set EXTRA=%EXTRA_CFLAGS%
+rem `library\platform.c` is deliberately skipped.  It contributes only
+rem mbedtls_platform_setup/teardown plus the win32 snprintf shims that platform.h
+rem force-enables for EVERY __MINGW32__ build; nothing here references any of those
+rem symbols (checked with nm over the whole object set), because calloc/free/
+rem printf/snprintf are all overridden by macros in the config.  The shims call
+rem UCRT `vsnprintf_s`, i.e. exactly the libc reference this no-CRT payload must
+rem never carry - so the file is left out rather than declaring a prototype for a
+rem function we do not implement.  build.bat links with -Wl,--no-undefined, which
+rem turns any future accidental dependency into a hard error.
 for %%F in ("%ROOT%deps\mbedtls-%VER%\library\*.c") do (
-  %RUN% -c -O2 -std=c11 -w -I "%ROOT%deps\mbedinc" -I "%ROOT%deps\mbedtls-%VER%\include" -o "%ROOT%build\mbedobj\%%~nxF.o" "%%F" >> "%ROOT%build\mbedlog.txt" 2>&1
+  if /i not "%%~nxF"=="platform.c" %RUN% -c -O2 -std=c11 %PORT% %STRICT% %EXTRA% -I "%ROOT%deps\mbedinc" -I "%ROOT%deps\mbedtls-%VER%\include" -o "%ROOT%build\mbedobj\%%~nxF.o" "%%F" >> "%ROOT%build\mbedlog.txt" 2>&1
 )
-%RUN% -c -O2 -std=c11 -w -o "%ROOT%build\mbedobj\mbedfmt.o" "%ROOT%src\mbedfmt.c" >> "%ROOT%build\mbedlog.txt" 2>&1
+%RUN% -c -O2 -std=c11 %PORT% %STRICT% %EXTRA% -o "%ROOT%build\mbedobj\mbedfmt.o" "%ROOT%src\mbedfmt.c" >> "%ROOT%build\mbedlog.txt" 2>&1
 
 rem ---- 3. archive, in batches: ~110 quoted absolute object paths exceed cmd's
 rem 8191-character command-line limit, which fails inside `ar` with no useful

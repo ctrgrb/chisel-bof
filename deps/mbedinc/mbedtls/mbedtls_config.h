@@ -78,8 +78,54 @@ void arena_free( void *p );
 #define MBEDTLS_SSL_TLS1_3_KEY_EXCHANGE_MODE_PSK_EPHEMERAL_ENABLED
 #define MBEDTLS_DEBUG_C
 
-#define MBEDTLS_PLATFORM_SNPRINTF_MACRO mbed_snprintf_impl
-#define MBEDTLS_PLATFORM_VSNPRINTF_MACRO mbed_vsnprintf_impl
+/* ---- stdio replacement: there is no CRT, so every standard stdio entry point
+ * that Mbed TLS *references* has to be both declared and provided by us.  This
+ * is a build-portability requirement, not tidiness:
+ *   - MBEDTLS_PLATFORM_NO_STD_FUNCTIONS above suppresses platform.h's
+ *     `#include <stdio.h>`, so `mbedtls_printf` (which expands to a bare
+ *     `printf` unless overridden) reaches every library TU undeclared;
+ *   - platform.h force-defines MBEDTLS_PLATFORM_HAS_NON_CONFORMING_{SN,VSN}PRINTF
+ *     for EVERY __MINGW32__ build, so library/platform.c compiles
+ *     mbedtls_platform_win32_{snprintf,vsnprintf}, which call `vsnprintf_s`;
+ *   - GCC >= 14 (any current mingw-w64 / MSYS2 toolchain) promotes
+ *     -Wimplicit-function-declaration / -Wint-conversion /
+ *     -Wincompatible-pointer-types from warnings to ERRORS, so those calls now
+ *     stop the build.  (gcc 8.1.0, used to develop this client, only warned and
+ *     the linker then dropped the never-referenced win32 shim - which is why the
+ *     old build looked fine.)
+ * We therefore override all four macros with our own implementations from
+ * src/mbedfmt.c and declare them HERE, in the config header, because that is
+ * the one file build_info.h includes before anything that uses them.  <stdio.h>
+ * is deliberately NOT included: it would pull mingw's declarations plus the
+ * `__USE_MINGW_ANSI_STDIO` redirections of printf/snprintf/puts into every
+ * library TU, i.e. libc symbols the payload must never import. */
+#include <stdarg.h>
+#include <stddef.h>
+
+int mbed_snprintf_impl(char *s, size_t n, const char *format, ...);
+int mbed_vsnprintf_impl(char *s, size_t n, const char *format, va_list ap);
+/* debug output has no sink inside a payload DLL: these discard the format,
+   exactly as the previous `printf` stub in src/crypto.c did. */
+int mbed_printf_impl(const char *format, ...);
+int mbed_fprintf_impl(void *stream, const char *format, ...);
+
+#define MBEDTLS_PLATFORM_SNPRINTF_MACRO    mbed_snprintf_impl
+#define MBEDTLS_PLATFORM_VSNPRINTF_MACRO   mbed_vsnprintf_impl
+#define MBEDTLS_PLATFORM_PRINTF_MACRO      mbed_printf_impl
+#define MBEDTLS_PLATFORM_FPRINTF_MACRO     mbed_fprintf_impl
+
+/* ---- toolchain determinism: pin the header-driven code paths too ----
+ * library/x509_crt.c chooses between the PLATFORM inet_pton() and its own
+ * software implementation on `_WIN32_WINNT >= 0x0600` (x509_crt.c:2698).  Older
+ * mingw-w64 (the msvcrt 8.1.0 toolchain this client was developed on) defaults
+ * _WIN32_WINNT below that, so it compiled the software version; a current
+ * UCRT-based mingw-w64 defaults it to Windows 10 and instead emits a reference to
+ * ws2_32's inet_pton - which our -nostdlib, ordinal-only winsock import library
+ * cannot satisfy (undefined reference to `__imp_inet_pton`).  Upstream's documented
+ * bypass forces the software implementation (it exists so that code path gets
+ * tested); using it makes MBED.a reference the same symbols on every toolchain.
+ * Affects only X.509 name-constraint IP-prefix checks, never the TLS handshake. */
+#define MBEDTLS_TEST_SW_INET_PTON
 
 #define MBEDTLS_OID_C
 
@@ -92,10 +138,17 @@ void arena_free( void *p );
 #define MBEDTLS_PK_C
 #define MBEDTLS_BASE64_C
 #define MBEDTLS_CIPHER_AES_ENABLED
-#define PSA_WANT_KEY_TYPE_AES
-#define PSA_WANT_ALG_CBC_NO_PADDING
-#define PSA_WANT_ALG_CTR
-#define PSA_WANT_ALG_GCM
+/* PSA_WANT_* must be written `#define PSA_WANT_X 1`, not the bare `#define
+ * PSA_WANT_X`: build_info.h includes mbedtls/config_adjust_psa_{from,superset}_legacy.h
+ * right after the config, and those headers define the SAME macros to `1` from the
+ * legacy MBEDTLS_* options.  With a valueless define every library TU gets 14
+ * "PSA_WANT_... redefined" preprocessor warnings, and any upstream check that reads
+ * the VALUE (`#if PSA_WANT_ALG_X`) only works because their define lands first.  Keep
+ * the `1` on all of them, including the ones upstream does not mirror. */
+#define PSA_WANT_KEY_TYPE_AES 1
+#define PSA_WANT_ALG_CBC_NO_PADDING 1
+#define PSA_WANT_ALG_CTR 1
+#define PSA_WANT_ALG_GCM 1
 #define MBEDTLS_PEM_PARSE_C
 #define MBEDTLS_X509_USE_C
 #define MBEDTLS_X509_CRT_PARSE_C
@@ -109,25 +162,24 @@ void arena_free( void *p );
 #define MBEDTLS_CIPHER_MODE_CBC
 #define MBEDTLS_CIPHER_MODE_CTR
 
-/* PSA wants (TLS 1.3 HKDF + ECDHE + hashes) */
 #define MBEDTLS_PEM_WRITE_C
-/* PSA wants (TLS 1.3 HKDF + ECDHE + hashes) */
-#define PSA_WANT_ALG_SHA_256
-#define PSA_WANT_ALG_SHA_384
-#define PSA_WANT_ALG_SHA_512
-#define PSA_WANT_ALG_HKDF
-#define PSA_WANT_ALG_HKDF_EXTRACT
-#define PSA_WANT_ALG_HKDF_EXPAND
-#define PSA_WANT_ALG_ECDH
-#define PSA_WANT_KEY_TYPE_ECC_KEY_PAIR_BASIC
-#define PSA_WANT_KEY_TYPE_ECC_KEY_PAIR_IMPORT
-#define PSA_WANT_KEY_TYPE_ECC_KEY_PAIR_EXPORT
-#define PSA_WANT_KEY_TYPE_ECC_PUBLIC
-#define PSA_WANT_ECC_SECP_R1_256
+/* PSA wants (TLS 1.3 HKDF + ECDHE + hashes) - see the note above about the `1` */
+#define PSA_WANT_ALG_SHA_256 1
+#define PSA_WANT_ALG_SHA_384 1
+#define PSA_WANT_ALG_SHA_512 1
+#define PSA_WANT_ALG_HKDF 1
+#define PSA_WANT_ALG_HKDF_EXTRACT 1
+#define PSA_WANT_ALG_HKDF_EXPAND 1
+#define PSA_WANT_ALG_ECDH 1
+#define PSA_WANT_KEY_TYPE_ECC_KEY_PAIR_BASIC 1
+#define PSA_WANT_KEY_TYPE_ECC_KEY_PAIR_IMPORT 1
+#define PSA_WANT_KEY_TYPE_ECC_KEY_PAIR_EXPORT 1
+#define PSA_WANT_KEY_TYPE_ECC_PUBLIC 1
+#define PSA_WANT_ECC_SECP_R1_256 1
 /* must mirror MBEDTLS_ECP_DP_SECP384R1/521R1_ENABLED above: PSA only registers
    curves it is told to want, and TLS parses/uses peer keys through PSA. */
-#define PSA_WANT_ECC_SECP_R1_384
-#define PSA_WANT_ECC_SECP_R1_521
+#define PSA_WANT_ECC_SECP_R1_384 1
+#define PSA_WANT_ECC_SECP_R1_521 1
 #define MBEDTLS_SSL_PROTO_TLS1_2
 #define MBEDTLS_SSL_TLS_C
 #define MBEDTLS_SSL_PROTO_TLS1_2

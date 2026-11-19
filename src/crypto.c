@@ -5,7 +5,17 @@
 #include <stdint.h>
 
 /* Freestanding .obj has no CRT: these definitions also satisfy GCC's
-   implicit memcpy/memset calls from struct/aggregate copies. */
+   implicit memcpy/memset calls from struct/aggregate copies.
+
+   !!! These bodies are byte loops that the COMPILER recognises as memcpy /
+   memset / memmove / memcmp / strlen / strcmp / strchr idioms and rewrites into
+   CALLS to those very functions - i.e. infinite self-recursion (a tail call: no
+   stack growth, so it just hangs, here before the first connect()).
+   Every build of this file MUST pass -fno-tree-loop-distribute-patterns:
+   GCC >= 12 runs that pass at -O2; the pinned 8.1 msvcrt toolchain only ran it
+   at -O3, which is why this never showed up on the reference box.
+   build.bat and tools/build-deps.bat both carry the flag in PORT - do not
+   compile these sources without it. */
 void *memcpy(void *d,const void *s,size_t n){
  uint8_t *a=(uint8_t*)d; const uint8_t *b=(const uint8_t*)s; size_t i;
  for(i=0;i<n;i++) a[i]=b[i];
@@ -43,10 +53,10 @@ char *strchr(const char *s,int c){
  for(;*s;s++) if(*s==(char)c) return (char*)s;
  return 0;
 }
-/* MBED.a debug path references stdio; no CRT in the payload. */
-int printf(const char *fmt, ...){ (void)fmt; return 0; }
-int putchar(int c){ (void)c; return c; }
-int puts(const char *s){ (void)s; return 1; }
+/* No stdio stubs here any more: the config overrides every printf/snprintf entry
+ * point Mbed TLS references with our own implementations (src/mbedfmt.c), so the
+ * library never emits a libc call.  memcpy/memset/strlen* stay: gcc turns struct
+ * and byte copies into calls to them, and the payload links no libc. */
 
 void sha256_copy(sha256 *src,sha256 *dst){
 dst->state[0]=src->state[0];dst->state[1]=src->state[1];

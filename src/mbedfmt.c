@@ -93,3 +93,33 @@ int mbed_vsnprintf_impl(char *s, size_t n, const char *format, va_list ap)
     if (n) { size_t t = (o.pos < n) ? o.pos : (n - 1u); s[t] = 0; }
     return r;
 }
+
+/* mbedtls_printf / mbedtls_fprintf (debug + error-string paths).  A payload DLL
+ * has no console and no CRT, so there is nowhere to put this output: the format
+ * string is validated by passing it through the engine above into a scratch
+ * buffer, then thrown away.  That is the same observable behaviour as the `printf`
+ * no-op stub this client used before, but it is reached through the documented
+ * MBEDTLS_PLATFORM_{PRINTF,FPRINTF}_MACRO hooks instead of by defining libc
+ * names, so the library never references a libc symbol at all. */
+int mbed_printf_impl(const char *format, ...)
+{
+    char scratch[1];
+    va_list ap;
+    int r;
+    va_start(ap, format);
+    r = mbed_vsnprintf_impl(scratch, sizeof(scratch), format, ap);
+    va_end(ap);
+    return r;
+}
+
+int mbed_fprintf_impl(void *stream, const char *format, ...)
+{
+    char scratch[1];
+    va_list ap;
+    int r;
+    (void) stream;
+    va_start(ap, format);
+    r = mbed_vsnprintf_impl(scratch, sizeof(scratch), format, ap);
+    va_end(ap);
+    return r;
+}
