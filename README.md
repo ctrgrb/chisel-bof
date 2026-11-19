@@ -15,6 +15,16 @@ source, including the crypto static library (pinned + hash-verified fetch of Mbe
 3.6.7). If you want to distribute a prebuilt DLL, attach it to a **GitHub Release**
 rather than committing it.
 
+A prebuilt payload is attached to the releases: **[latest
+release](https://github.com/ctrgrb/chisel-bof/releases/latest)** — currently `v1.12.1-bof`,
+asset `stockpe9.dll`, 21,399,040 bytes,
+`sha256 62def2d5d3bebd0bc6aebf95711b35f6807789e2e39c1d9a2ff30e43b88d0232` (repeated in the
+`SHA256SUMS.txt` asset). Check it, or rebuild it yourself with `build.bat` — a local
+rebuild will **not** hash-match, because the PE timestamp and the absolute `__FILE__`
+paths embedded by Mbed TLS's debug build depend on where the dependency was unpacked.
+Compare behaviour instead: the import list must be `ws2_32.dll` + `KERNEL32.dll`, and
+`tools/pehl2dir.py --audit` must report zero out-of-image absolute slots.
+
 ## Quick start
 
 ```
