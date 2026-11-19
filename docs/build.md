@@ -48,7 +48,12 @@ mysterious blob, and it is not published. `tools/build-deps.bat` (called automat
    `deps/mbedinc/mbedtls/mbedtls_config.h` wins over upstream's config.
 3. Archives the objects into `deps/MBED.a` in batches (~110 quoted absolute paths exceed
    `cmd`'s 8191-character command-line limit) and generates `deps/WS2_32nat.a` from
-   `deps/WS2_32nat.def` with `dlltool`.
+   `deps/WS2_32nat.def` with `dlltool`. The def is the payload's entire winsock surface —
+   13 names (`WSAStartup WSAGetLastError socket connect bind? no: send recv select getsockopt
+   setsockopt ioctlsocket gethostbyname shutdown closesocket`) — `setsockopt` being there
+   because `SO_RCVTIMEO`/`SO_SNDTIMEO` implement the handshake deadlines. If you add a winsock
+   call to the payload, add it here first: `-Wl,--no-undefined` turns the omission into a link
+   error rather than a crash, and deleting `deps/WS2_32nat.a` forces `dlltool` to regenerate it.
 
 `library/platform.c` is **skipped on purpose**: `platform.h` force-defines
 `MBEDTLS_PLATFORM_HAS_NON_CONFORMING_{SN,VSN}PRINTF` for every `__MINGW32__` build, so that

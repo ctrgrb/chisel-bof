@@ -89,4 +89,81 @@ python tests\slowapp.py 1080 6                       # ... while it is wedged: m
 
 Expected: the wedged channel alone is lost (after the client's ~30 s write deadline),
 the session survives with zero `ping failed`, other streams return `sha_ok=True`, and
-the client's CPU stays flat (no spin).
+the client's CPU stays flat (no spin). The same holds with the client's *own* pings
+enabled (the default `--keepalive 25s`): zero `ping failed`/`ping timeout` on the server
+and no `ka: no pong` teardown on the client.
+
+## 4. Authentication
+
+The server must run with `--auth` (or `--authfile`) for this to mean anything:
+
+```
+chisel server --port 8411 --reverse -v --auth "op:s3cr3t:pass" \
+              --tls-cert cert.pem --tls-key key.pem
+```
+
+| client invocation | expected client | expected server log |
+|---|---|---|
+| no `--auth` | twin: `auth failure: methods=[password] count=1 partial=0`, `stage auth failed user=` (empty), `ss_run rc=-2`, then the `session died at SSH userauth: …` hint and backoff | `Login failed for user ""`, no `Open` |
+| `--auth op:wrong` | same, with `user=op` | `Login failed for user "op"` |
+| `--auth "op:s3cr3t:pass"` | session opens; `Open (user=op …)`; fetches byte-exact | `session#N: Open (user=op addr=… remotes=…)` + `tun: Bound proxies` |
+| `--auth op` (no colon) | `bad --auth op (expected <user>:<pass>)`, exit 7, no dial | nothing |
+| more than 24 packed `z` records (PE image only) | `go()` returns 6; `stock_run` never starts, so there is no dial | nothing at all |
+
+The colon-in-password row is the one to keep: `settings.ParseAuth` splits at the **first**
+colon, so `s3cr3t:pass` is one password. A build that split at the last colon logs
+`Login failed for user "op"` with the credentials looking correct.
+
+`ss_run` returning `-2` means *the transport worked and the credential did not* — it is the
+difference between "fix the password" and "fix the network", and it only shows up in the twin
+or a `-DDIAG_MARK` build (the shipped image has `OUT()` compiled out; the server log is then
+the only visible half).
+
+## 5. Timeouts, keepalive and black-holed paths
+
+Phase deadlines, measured against a peer that accepts TCP and then does nothing
+(`gotest`-style silent listener, or any port with a listening socket behind it):
+
+```
+build\pebdrv.exe build\chiselbof.dll https://127.0.0.1:8413 "R:1080:socks" --ws-timeout 2s --max-retry-count 1
+```
+
+`--ws-timeout 1s` → exits in ~1.0 s, `--ws-timeout 2s` → ~2.0 s: the deadline is enforced, not
+decorative (`--ssh-timeout` behaves the same way, 2 s → 2032 ms and 6 s → 6041 ms measured on
+the twin, marking `stage handshake failed`). `--max-retry-count 1` means exactly one attempt
+(the failed attempt is counted before the decision, as upstream does); `2` gives one retry.
+
+Black-hole detection — the test that a keepalive is actually *for*. Nothing resets, nothing
+times out at the TCP layer, so the only signal is the missing `pong`:
+
+```
+# client machine
+python tests\wedge_relay.py 8412 127.0.0.1 8411 C:\tmp\_hole.on
+build\pebdrv.exe build\chiselbof.dll https://127.0.0.1:8412 "R:1080:socks" ^
+    --auth op:s3cr3t:pass --keepalive 3s --ping-timeout 2s --ws-timeout 3s
+curl -x socks5h://127.0.0.1:1080 -o NUL -w "%{http_code}\n" http://127.0.0.1:9006/big.bin   # 200 first
+echo. > C:\tmp\_hole.on && timeout /t 8 >nul && del C:\tmp\_hole.on
+```
+
+Expected on the **server**: `session#N: Close (user=op … duration=8.26s)` written while the
+relay was still holding both sockets open — i.e. the *client* ended it — then
+`session#M: Open (user=op …)` for the redial, and byte-exact fetches through the same socks
+port again. Measured on this build with `--keepalive 3s --ping-timeout 2s --ws-timeout 3s
+--ssh-timeout 4s --min-retry-interval 1s --max-retry-interval 3s`: teardown 5-8 s after the hole
+appears, `Close (user=op … duration=11.323723s)` on the wedged session, a fresh `Open` **3 s**
+later, and byte-exact 6 MiB fetches **8 s** after the flag file was deleted — the attempts in
+between are bounded by `--ws-timeout`/`--ssh-timeout` + the backoff wait, so the worst case is
+attempts × (deadline + wait).
+
+**The flag list is itself a test on the PE image** (the twin takes real `argv` and never hits
+this): pack 24 `z` records and the session opens; pack 26 or 44 and `go()` returns 6 — count
+`Handshaking with` lines in the server log and expect zero. Older builds capped the list at 8
+records and *dropped the rest silently*, so every flag past the eighth (`--ws-timeout`,
+`--ssh-timeout`, the retry flags, even `--auth`) had no effect in the DLL while the same command
+line worked in the twin; the symptom was a stalled handshake timing out at the 45 s default
+despite `--ws-timeout 3s` on the command line.
+
+**Control, same hole, `--keepalive 0`:** zero `ka:` marks, no teardown, one session, and the
+path stays unusable until the *server's* own pings expire it (~125 s). A keepalive-free build
+passes every other suite in this folder and still loses the connection silently in the field —
+which is the reason this test exists.

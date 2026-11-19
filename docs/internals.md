@@ -3,7 +3,7 @@
 ```
 go(args,len)                       BOF entry, arg unpacking, session loop
   arena (20 MiB, .data)            every allocation
-  ws2_32 by ordinal                socket/connect/send/recv/select/…
+  ws2_32 (13 names, hand def)      socket/connect/send/recv/select/setsockopt/…
   Mbed TLS 3.6.7 (trimmed)         TLS 1.2 only, SNI, chain parsed, not verified
   WebSocket client                 masked frames, single non-blocking outbox
   SSH client (src/sshtun.c)        curve25519-sha256, chacha20-poly1305, channels
@@ -11,14 +11,21 @@ go(args,len)                       BOF entry, arg unpacking, session loop
   remotes                          socks5 (client-side name resolution), TCP, UDP(gob)
 ```
 
-One thread drives everything: TLS record I/O, WebSocket framing, the SSH pump, the server's
-25 s pings, and every proxied channel. Nothing blocks it; nothing else exists (no threads, no
-fibre scheduling — unlike the Go client).
+One thread drives everything: TLS record I/O, WebSocket framing, the SSH pump, the keepalive
+pings in both directions, and every proxied channel. Nothing blocks it; nothing else exists (no
+threads, no fibre scheduling — unlike the Go client).
 
 ## Image and loading
 
 - Entry `DllMainCRTStartup` returns immediately; the only export is `go @1`
   (`deps/chiselbof.def`).
+- `go(const char *args, int len)` unpacks the beacon's `z` records itself (`pe_args` in
+  `src/stock.c`): it accepts the Cobalt-Strike form (leading `u32` = size of the remainder) and
+  the Outflank form (leading `u32` = total including the header), falling back to the other if the
+  first does not match. At most `PE_MAXARG` = **24** records, each truncated to 512 characters.
+  Any leftover byte after 24 records means the list was longer than the cap: it returns 6 (then
+  `stock_run` never runs) instead of using the prefix. Silently dropping the tail is not an
+  option — the tail is where `--auth`, `--ws-timeout` and the retry flags land.
 - Built `-nostdlib -shared -Wl,--dynamicbase -Wl,--strip-all -Wl,--no-undefined`, compile side
   `-fno-pic -fno-pie`.
 - 587 absolute relocation slots (581 on a GCC 16 build), **all of them pointing inside the
@@ -50,10 +57,14 @@ we never define a libc-named symbol that the CRT would also want — with the ex
 byte-loop helpers above, which is exactly why
 [the loop-idiom flag](build.md#the-flag-table) is mandatory.
 
-Winsock is imported **by ordinal** from `deps/WS2_32nat.def` (generated with `dlltool`), and every
-call site uses a hand-written `extern` declaration — no `<winsock2.h>`, no SDK headers, so nothing
-can drag in a CRT dependency. Note the `select()` extern: the payload includes no headers, so the
-prototype has to be explicit or a modern compiler will refuse the build.
+Winsock comes from a hand-written import def, `deps/WS2_32nat.def` (`dlltool` generates the
+`.a`; `gethostbyname`/`getsockopt` carry explicit ordinals), and every call site uses a
+hand-written `extern` declaration — no `<winsock2.h>`, no SDK headers, so nothing can drag in a
+CRT dependency. The list is 13 names: the 12 transport calls plus `setsockopt`, which the
+timeout options (`SO_RCVTIMEO`/`SO_SNDTIMEO`) need. Note the `select()` extern: the payload
+includes no headers, so the prototype has to be explicit or a modern compiler will refuse the
+build. `KERNEL32` contributes exactly one import, `GetTickCount64`, which is the clock for every
+deadline here — connect, handshake, pong and backoff.
 
 ## Randomness
 
@@ -91,8 +102,98 @@ Two consequences of that design are worth knowing:
   `'C'`/`'S'`/`'A'`/`'D'`/`'E'`/`'I'` tags of the chacha20-poly1305 profile.
 - Channel parameters `CH_W = 2097152`, `CH_MAX = 32768` match x/crypto's
   `channelWindowSize`/`channelMaxPacket` exactly; the server's credit accounting assumes them.
+- User-auth: a `none` probe (to read the server's allowed methods) and then `password` — that is
+  chisel's only credential path, see [Authentication](#authentication).
 - The stock server rekeys the transport at `1 << 30` bytes of traffic — minutes of normal
   browsing — and `do_rekey` survives it in place.
+
+## Authentication
+
+A chisel server started with `--auth`/`--authfile` does **not** authenticate the WebSocket
+upgrade: there is no `Authorization` header anywhere in chisel's protocol. It authenticates the
+SSH layer. `server/server.go` installs `authUser` as the `ssh.ServerConfig`
+`PasswordCallback`:
+
+```go
+func (s *Server) authUser(c ssh.ConnMetadata, password []byte) (*ssh.Permissions, error) {
+	// check if user authentication is enabled and if not, allow all
+	if s.users.Len() == 0 {
+		return nil, nil
+	}
+	// check the user exists and has matching password
+	n := c.User()
+	user, found := s.users.Get(n)
+	if !found || subtle.ConstantTimeCompare([]byte(user.Pass), password) != 1 {
+		s.Infof("Login failed for user %q (%s)", n, c.RemoteAddr())
+		return nil, fmt.Errorf("invalid authentication for username: %s", n)
+	}
+	return &ssh.Permissions{Extensions: map[string]string{"user": n}}, nil
+}
+```
+
+so the client's job is to send a `USERAUTH_REQUEST` with method `password`, the username and the
+password. `ss_run(…, user, pass, …)` does exactly that, and the username is what later shows up
+in the server log (`Open (user=op addr=… remotes=…)`), which is also how `--authfile`'s
+per-user `addr` allow-list is keyed. `--auth <user>:<pass>` is split at the **first** colon —
+the same rule as `settings.ParseAuth` upstream — so a password may contain colons; with no colon
+the payload reports `bad --auth <value> (expected <user>:<pass>)` and returns 7.
+
+A rejected credential is distinguishable from a transport failure: `ss_run` returns `-2` after
+logging `auth failure: methods=[…] count=N partial=0` and `stage auth failed user=…`, and the
+operator sees the server write `Login failed for user "<name>"`. Everything else returns `-1`.
+
+**Wire quirk worth knowing:** the `USERAUTH_FAILURE` reply is produced by x/crypto's
+`userAuthFailureMsg{ Methods []string; PartialSuccess bool }`, i.e. marshalled **name-list
+first, boolean second** — the reverse of RFC 4252 §5.1. Against chisel 1.12.1 the measured body
+is `51 | 00 00 00 08 "password" | 00` (one method, `partial=false`, one trailing pad byte). A
+parser written from the RFC reads that as garbage; `auth_read` parses x/crypto's order.
+
+## Timeouts and keepalive
+
+Three separate deadlines, all set with `setsockopt(SO_RCVTIMEO/SO_SNDTIMEO)` — the 13th winsock
+name this image imports — and all cleared again before the data pump starts:
+
+| phase | flag | default | what a timeout looks like |
+|---|---|---|---|
+| TCP connect | `--connect-timeout` | 8 s | non-blocking `connect` + `select`, confirmed with `SO_ERROR`; `retry: connect` |
+| TLS handshake + upgrade read | `--ws-timeout` | 45 s | `handshake ret=-0x1`, `retry: tls handshake`; measured 1 s and 4 s flags produce 1030 ms and 4020 ms exits |
+| SSH handshake, userauth, `config` | `--ssh-timeout` | 30 s | `stage handshake failed` / `stage auth failed`, `ss_run rc=-2`; measured 2 s and 6 s flags produce 2032 ms and 6041 ms exits |
+
+They are cleared (`sock_timeo(fd, 0)`) before `ws_set_nb()` because the pump below is
+`select`-driven: with a receive timeout installed, `recv` inside the pump would return
+`WSAETIMEDOUT` on any idle second and look like a broken tunnel.
+
+Keepalive is what notices a path that is *alive at the TCP layer and dead underneath* — a
+front-end that dropped an idle stream, a NAT expiry, a laptop that slept. Without it the pump
+sits in its 1 s `select` forever, because nothing ever arrives to wake it. The client sends the
+SSH global request `ping` (`wantReply`) every `--keepalive`, and if no `81`/`82` comes back
+within `--ping-timeout` (default: the keepalive interval) it declares the tunnel dead. Measured
+with `tests/wedge_relay.py` (a relay that keeps both sockets open and silently stops forwarding):
+a 3 s keepalive + 2 s ping-timeout ends the session 5-8 s after the path black-holes, the server
+logs `session#N: Close (user=op … duration=8.26s)` **because the client closed it**, and a fresh
+session was declared and serving 6 MiB byte-exactly ~15 s after the path returned (console twin).
+The shipped PE image, same rig, flags `--keepalive 3s --ping-timeout 2s --ws-timeout 3s
+--ssh-timeout 4s --min-retry-interval 1s --max-retry-interval 3s`: the wedged session is closed by
+the client (`Close … duration=11.323723s`), a fresh `Open` lands **3 s later**, and byte-exact
+6 MiB fetches work **~8 s after the path returned**. Worst case is
+attempts × (`--ws-timeout` + backoff wait). That PE number was ~45 s in an earlier build for the
+same command line, and it was not the network: the flags sat past the 8-record packed-argument
+cap and were dropped, so the image was dialing with 45 s defaults (see `PE_MAXARG` above). With
+`--keepalive 0` the same hole was never noticed at all: zero marks, no teardown, one session
+until the server's own pings expired it.
+
+Pings are interval-driven, never per-spin: the earlier implementation answered every spin with a
+ping, which saturated the server's mux and closed the session every ~27 s.
+
+Reconnect: after any session death the client redials and re-declares its remotes, waiting
+chisel's backoff (`jpillora/backoff`, jitter on, factor 2): uniform in `[min, min·2ⁿ]` capped at
+`--max-retry-interval`. Measured: `1000, 1615, 3421, 6191, 9125, 19609, 28835 ms`. `attempts`
+counts failed connections and is **reset once a session has stayed up for more than 5 s** —
+upstream's `connected = time.Since(t0) > 5*time.Second` rule — so a long-lived proxy never burns
+a budget. `--max-retry-count` behaves as it does upstream: the failed attempt is counted before
+the decision, so `1` means exactly one attempt, and a negative value (the default) is unlimited.
+At most `SESSION_MAX` (512) sessions are attempted per `go()` call, so a permanently unreachable
+server cannot spin forever inside one beacon task.
 
 ## Chisel control plane
 
@@ -108,9 +209,16 @@ body is chisel's own JSON config (upstream's `settings.EncodeConfig` shape), e.g
 UDP remotes arrive as `LocalProto:"udp"`. This is the request whose contents show up in the
 server log line `Open (user=- addr=… remotes=R:1080:socks)`.
 
-- Keepalive: the server sends SSH **global** requests named `ping` (every 25 s by default); the
-  client answers `pong` in the same message type (`80` → `81`). Missing pings are how the server
-  kills a wedged client ~125 s later, so the pump must never block.
+- Keepalive runs in **both** directions (upstream's `BindSSH` starts `keepAliveLoop` on both
+  ends): the server sends SSH **global** requests named `ping` (type `80`, `wantReply` set) every
+  25 s and the client answers `pong` in type `81`; and the client sends its own `ping` every
+  `--keepalive` (default 25 s) and requires the reply within `--ping-timeout`. A reply body of
+  zero length or exactly `pong` is accepted — anything else is chisel's "strange ping response"
+  and ends the session, as does a `81` carrying failure or a type `82` (peer refused the ping).
+  Missing pings are how the *server* kills a wedged client ~125 s later; missing pongs are how the
+  client notices a path that is silently black-holed (see
+  [Timeouts and keepalive](#timeouts-and-keepalive)). The pump must never block, so pings are
+  interval-driven, never per-spin.
 - Each proxied stream is its own SSH channel: `90` open, `94` data, `93` window adjust, `96` EOF,
   `97` close, `92` open-refused. A `R:<port>:socks` remote is one channel whose open carries the
   extra data string `socks`; the client then speaks SOCKS5 on that channel and resolves CONNECT
@@ -128,8 +236,23 @@ server log line `Open (user=- addr=… remotes=R:1080:socks)`.
   `WSADATA` buffer, not a pointer to nothing.
 - `Host:` must be `host[:port]` with the port omitted for the scheme default — a front-end that
   correlates SNI with `Host` rejects anything else with `421`/`SSLMismatchedSNI`.
-- The WebSocket client masks every frame (RFC 6455 client rule); an unmasked frame is answered
-  with a close and, behind a front-end, with a `400` from the proxy layer instead.
+- `ioctlsocket`'s command is an **encoded winsock ioctl**, not the BSD integer: `FIONBIO =
+  _IOW('f',126,u_long) = 0x8004667E` (and `FIONREAD = 0x4004667F`). Passing BSD-style `0` makes
+  the call fail with `WSAEINVAL`, which is what this payload used to do — so for a long time no
+  socket was ever actually switched to non-blocking mode: the pump's "non-blocking" behaviour came
+  from `MSG_DONTWAIT` on the TLS write path, and the bounded dial was decorative (a black-holed
+  SYN stalled the single thread for the OS SYN-retry period, ~21 s, not the intended 8 s).
+- Related, and the reason the mode is left alone: **the pump runs on blocking sockets, and that is
+  the tested contract.** Turning the server socket non-blocking for real truncates proxied streams
+  (`tls_read` maps a mid-record `WSA_E_WOULDBLOCK` to a transport error rather than "nothing yet":
+  measured `0/6` in `tests/slowapp.py`, streams dying after 0.4-2.2 MB with zero server-side
+  errors). The only intentionally non-blocking phase is the dial inside `sock_raw_connect`, which
+  is restored to blocking before the fd is handed out — that is what makes `--connect-timeout`
+  real, and `SO_RCVTIMEO`/`SO_SNDTIMEO` (ignored on a non-blocking socket) then bound every
+  handshake phase.
+- The WebSocket outbox (`obuf`) and the outbox-mode flag must be **reset per session**: a frame
+  left half-flushed by a dead connection makes the next session's first write return "refused",
+  and since nothing ever drains it there, the reconnect loop spins without ever reaching the pump.
 
 ## Diagnostic build switches
 

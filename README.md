@@ -13,12 +13,13 @@ the official 1.12.0 binary, both directly and behind a public TLS front-end (see
 Nothing binary is committed here: `build.bat` builds everything from source, including the
 crypto static library (hash-verified fetch of Mbed TLS 3.6.7). The prebuilt payload lives on
 the **[latest release](https://github.com/ctrgrb/chisel-bof/releases/latest)** — currently
-`v1.12.1-bof`, asset `chiselbof.dll`, 21,399,040 bytes,
-`sha256 013877b4da9f5ba3c03c337dcefee40544c27d8ea63ae77802aac93618412838` (also in the
+`v1.12.1-bof`, asset `chiselbof.dll`, 21,401,088 bytes,
+`sha256 5ab479ebd56e280e190929ca196853464f82f85c3f97f1a8356356dcfcf45b42` (also in the
 `SHA256SUMS.txt` asset). Your own rebuild will **not** hash-match it: the PE timestamp and
 the absolute `__FILE__` paths that Mbed TLS's debug build embeds depend on where the
-dependency was unpacked. Check the shape instead — imports `ws2_32.dll` + `KERNEL32.dll`,
-and zero out-of-image absolute slots from `tools/pehl2dir.py --audit`.
+dependency was unpacked. Check the shape instead — imports `ws2_32.dll` (13 winsock names) +
+`KERNEL32.dll` (`GetTickCount64`), and zero out-of-image absolute slots from
+`tools/pehl2dir.py --audit` (587/587).
 
 ## Compile
 
@@ -93,8 +94,52 @@ Two things that look wrong but are expected:
 | reverse port forward | `R:<bind>:<host>:<port>` | `R:127.0.0.1:2222:10.0.0.5:22` |
 | reverse UDP relay | `R:<bind>:<host>:<port>/udp` | chisel's gob `udpPacket{Src,Payload}` codec, source-peer fidelity (the DNS path) |
 | forward remote | `<lport>:<host>:<port>` | local listener on the beacon host |
-| auth | server `--auth` | client sends the `Authorization` header on the upgrade |
-| keepalive / reconnect | server pings every 25 s | client answers; any session death triggers redial + re-declaration (2 s backoff, never gives up on front-end `5xx`) |
+| auth | `--auth <user>:<pass>` | chisel's own flag: SSH password userauth, checked by the server's `PasswordCallback` — see [Parameters](#parameters-chisel-compatible-flags) |
+| keepalive / reconnect | `--keepalive 25s` (default) | both ends ping; each side answers the other's `ping` with `pong`. Any session death redials and re-declares the remotes, with chisel's exponential backoff — see [Parameters](#parameters-chisel-compatible-flags) |
+
+### Parameters (chisel-compatible flags)
+
+Every flag is an ordinary argument in the same list as the URL and the remotes, so the beacon
+passes them the same way it passes the URL (`z`-packed strings). Durations use chisel's own
+syntax — `500ms`, `30s`, `5m`, `1h` (a bare number means seconds, which `chisel` itself
+rejects). Names and defaults match the Go client's flags/env, so a working `chisel client`
+command line transfers over unchanged.
+
+| flag | default | what it does (upstream equivalent) |
+|---|---|---|
+| `--auth <user>:<pass>` | none | Authenticates to the server. Split at the **first** colon, so the password may contain colons. This is chisel's SSH-level auth: the payload sends `USERAUTH_REQUEST` method `password` (after a `none` probe) and the server checks it in `PasswordCallback` (`server/server.go:authUser`), which is also how `--authfile` per-user address allow-lists are keyed. A rejected credential ends the session and the client retries with backoff — the server logs `Login failed for user "<name>"`. |
+| `--keepalive <dur>` | `25s` | How often **this client** sends the SSH global request `ping` and waits for the `pong` reply (`--keepalive 0s` disables our pings; the server's own pings are still answered). Matches `Config.KeepAlive` in the Go client, whose tunnel runs the same keepalive loop on both ends. |
+| `--ping-timeout <dur>` | = keepalive | How long to wait for that `pong` before declaring the tunnel dead and redialing (chisel's `PING_TIMEOUT`). This is what detects a *black-holed* path — front-end idle drop, NAT expiry, sleep/wake — where the TCP socket stays open and no byte ever arrives. |
+| `--connect-timeout <dur>` | `8s` | Dial deadline (non-blocking `connect` + `select`, confirmed with `SO_ERROR`), applied to the server socket and to every proxied target. |
+| `--ws-timeout <dur>` | `45s` | Deadline for the TLS handshake **and** the WebSocket upgrade read (chisel's `WS_TIMEOUT`). |
+| `--ssh-timeout <dur>` | `30s` | Deadline for the SSH handshake, userauth and the `config` request (chisel's `SSH_TIMEOUT`). |
+| `--min-retry-interval <dur>` | `1s` | Lower bound of the reconnect backoff (`--min-retry-interval`). |
+| `--max-retry-interval <dur>` | `5m` | Upper bound of the reconnect backoff (`--max-retry-interval`). |
+| `--max-retry-count <n>` | unlimited | Give up (return to the beacon) after `n` failed attempts. `-1` or `0`-or-more semantics as chisel: a negative value means unlimited. Attempts are counted per failed session and **reset once a connection has stayed up for more than 5 s** (chisel's `connected` rule), so a long-lived proxy never accumulates a budget that eventually kills it. |
+
+Backoff is chisel's (`jpillora/backoff`, jitter on, factor 2): the wait for attempt *n* is
+uniform in `[min, min·2ⁿ]`, capped at `max-retry-interval`. Measured on this build:
+`1000, 1615, 3421, 6191, 9125, 19609, 28835 ms`. A front-end that answers `502/503/421`
+because the backend behind it restarted is treated as a session death, so the client backs
+off and keeps trying instead of burning a fixed budget.
+
+The payload's own knobs, not chisel's: `--port <p>` (server port, if the URL has none),
+`--listen <p>` (socks bind port when the remote spells it without a port; default 1080),
+`--tgt <A.B.C.D[:port]>` (destination for SOCKS `CONNECT`s that arrive without an address),
+`--ver <string>` (version reported in the `config` request), `--hv <n>` (KEX version-string
+shape, for handshake experiments).
+
+The BOF-PE entry unpacks at most **24** `z` records (URL + remotes + flags), and a longer list
+makes `go()` return 6 **without running anything** — it does not truncate. That matters with the
+flags above: a truncated list would drop `--auth` or the timeouts while the proxy still appeared
+to work, which is exactly the failure this used to have (`SO_RCVTIMEO` measured installed at the
+45 s default while the command line said `3s`, because the flag sat past the old 8-record cap).
+The twin build (`-DTWIN_MAIN`, command in [docs/build-problems.md](docs/build-problems.md)) takes
+real `argv`, so it never hits the limit — which is why this bug only ever showed in the DLL.
+
+To *see* what these knobs are doing — the `ping`/`pong` cadence, which phase timed out, which
+methods the server would accept — build the console twin or a `DIAG_MARK` build:
+[docs/build-problems.md](docs/build-problems.md).
 
 Local smoke test without any C2 (one machine):
 
@@ -145,9 +190,10 @@ header:
   Go's client — a malformed `Host` gives `421 Misdirected Request` / `SSLMismatchedSNI`;
 - the client is pinned to **TLS 1.2**: Front Door answers this trimmed build's TLS 1.3
   ClientHello with fatal alert 40;
-- reconnect must survive the front-end answering `502` while the backend is down — only
-  genuine connect failures are bounded, so the client redials forever and a wrong URL still
-  returns control to the beacon.
+- reconnect must survive the front-end answering `502` while the backend is down: caddy and
+  Front Door complete the TLS handshake happily and answer `502` themselves, so the client
+  treats that as a session death and backs off (chisel's backoff, `--max-retry-count`
+  unlimited by default) instead of consuming a hard connect budget.
 
 [docs/afd-front-end.md](docs/afd-front-end.md) has the full write-up, the symptom→cause table
 and the measured reconnect numbers.
@@ -166,26 +212,35 @@ One DLL, one thread, no C runtime. From the outside in:
 - **libc it does not have.** `memcpy/memset/memmove/memcmp/strlen/strcmp/strchr` and the
   whole `printf` family are our own (`src/crypto.c`, `src/mbedfmt.c`) and Mbed TLS's config
   macros are pointed at them, so no libc symbol is ever referenced or defined. Winsock is
-  imported **by ordinal** (`deps/WS2_32nat.def`) with hand-written externs — no SDK headers.
+  declared in a hand-written import def (`deps/WS2_32nat.def`: 13 names, including
+  `setsockopt` for the timeout options) and every call site uses a hand-written extern —
+  no SDK headers.
 - **TLS.** Mbed TLS 3.6.7, trimmed config, min = max = TLS 1.2, SNI on, certificate chain
   parsed but not verified. Crypto primitives the SSH layer needs (SHA-256, chacha20,
   poly1305, X25519, the OpenSSH KDF) are ours, in `src/crypto.c` / `src/x25519.c`.
-- **Transport.** HTTP/1.1 upgrade with `Sec-WebSocket-Protocol: chisel-v3` (plus optional
-  `Authorization`), then WebSocket frames with a single non-blocking **outbox**: if the socket
-  accepts only part of a frame, the rest is finished by the pump instead of blocking it.
+- **Transport.** HTTP/1.1 upgrade with `Sec-WebSocket-Protocol: chisel-v3` and no
+  authentication header — chisel authenticates inside SSH, not at the upgrade (see
+  [Parameters](#parameters-chisel-compatible-flags)), then WebSocket frames with a single
+  non-blocking **outbox**: if the socket accepts only part of a frame, the rest is finished by
+  the pump instead of blocking it.
 - **Tunnel.** Inside the WebSocket sits a real SSH client (`src/sshtun.c`):
   `curve25519-sha256` KEX, `chacha20-poly1305` records, ECDSA/RSA/Ed25519 host keys accepted,
   channel window 2 MiB / max packet 32 KiB exactly matching x/crypto, rekey at 1 GiB served.
 - **Chisel control.** After SSH auth the client sends one SSH global request `config` whose
   JSON body is chisel's own `Config` (`Version`, `Remotes[]` with `LocalHost/LocalPort/
   LocalProto/RemoteHost/RemotePort/RemoteProto/Socks/Reverse`); the server logs those remotes
-  at `Open`. The server then pings with SSH global `ping` requests every 25 s and the client
-  answers `pong`. Each proxied stream is its own SSH channel; `R:1080:socks` is one channel
-  whose open carries the extra `socks` string, and UDP remotes use chisel's gob codec.
-- **Lifecycle.** Session loop: connect → TLS handshake → upgrade → SSH → declare remotes →
-  pump until death → redial and re-declare. Connect failures are bounded (16 tries) so a wrong
-  URL returns control to the beacon; every other failure backs off 2 s forever. Session
-  teardown/rebuild is capped (`SESSION_MAX 512`) and the arena is reset between sessions.
+  at `Open`. If the server has `--auth`, the SSH user-auth step carries the `--auth`
+  credentials. Keepalive runs in both directions (`ping`/`pong` global requests every
+  `--keepalive`), and any session death redials with chisel's backoff. Each proxied stream is
+  its own SSH channel; `R:1080:socks` is one channel whose open carries the extra `socks`
+  string, and UDP remotes use chisel's gob codec.
+- **Lifecycle.** Session loop: connect (deadline `--connect-timeout`) → TLS handshake +
+  upgrade (deadline `--ws-timeout`) → SSH handshake, userauth and `config` (deadline
+  `--ssh-timeout`) → pump, answering and sending keepalive pings, until death → back off
+  (`--min/max-retry-interval`, `--max-retry-count`) → redial and re-declare. Every phase is
+  bounded, and the attempt counter resets after any session that stayed up more than 5 s.
+  Session teardown/rebuild is capped (`SESSION_MAX 512`) and the arena is reset between
+  sessions.
 - **Single pump discipline.** That one thread services TLS, WebSocket, pings and every
   channel, so no target write may ever spin: target writes wait for writability with a
   bounded `select()` and give up on that channel alone after ~30 s, and window-stalled
@@ -219,7 +274,7 @@ src/x25519.c                  X25519 (Montgomery ladder, RFC 8032)
 src/chisel_crypto.h           shared crypto declarations
 deps/mbedinc/mbedtls/mbedtls_config.h   trimmed config (load-bearing, see docs/build.md)
 deps/chiselbof.def            DLL exports (`go @1`)
-deps/WS2_32nat.def            winsock imports by ordinal (the `.a` is generated)
+deps/WS2_32nat.def            winsock import list (the `.a` is generated from it)
 docs/                         build, front-end, stability and internals notes
 tools/pebdrv.c                test loader: packs CLI args BOF-style, calls `go()`
 tools/pehl2dir.py             HIGHLOW -> DIR64 base-relocation audit/rewriter
