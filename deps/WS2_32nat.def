@@ -6,6 +6,7 @@ EXPORTS
  select
  recv
  send
+ setsockopt
  socket
  WSAStartup
  WSAGetLastError

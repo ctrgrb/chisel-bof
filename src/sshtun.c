@@ -2,7 +2,7 @@
  * Shared verbatim by tools/ext/tlsprobe.c (console twin) and bof/stock.c
  * The includer MUST, BEFORE this #include, define ws_put(ctx,pl,pn) /
  *   ws_get(ctx,pl,&pn,maxpl) (one WS binary frame each over the TLS record
- *   layer) and sock_connect(host,port) (dial a target, fd or -1).
+ *   layer) and sock_connect(host,port) (dial a target, blocking fd or -1).
  * plus externs: b64_encode, sha256_*, ssh_kdf, chacha20_keystream,
  * poly1305_sum, mpint_payload, x25519_*, winsock BSD send/recv/closesocket.
  *
@@ -62,7 +62,15 @@ static int sl_shut(int fd,int how){ SLOG("shut fd=%d how=%d u=%u",fd,how,(unsign
 #endif
 #else
 #ifndef SLOG
+#if defined(TWIN_MAIN)
+/* Console twin: the wire-layer marks go to stderr as well as the OUT() lines. The
+ * keepalive, per-phase timeout and auth diagnostics live in this file, so without them
+ * the twin can only show the outer loop's messages.  Format strings here are the same
+ * subset slogw() understands (%d, %u, %s - never %llu). */
+#define SLOG(...) do{ fprintf(stderr, __VA_ARGS__); fputc('\n', stderr); }while(0)
+#else
 #define SLOG(...) ((void)0)
+#endif
 #endif
 #endif
 
@@ -75,10 +83,15 @@ extern int send(int, const char *, int, int);
 extern int recv(int, char *, int, int);
 extern int closesocket(int);
 extern int shutdown(int, int);
-extern int setsockopt(int, int, const char *, int);
+/* host-file contract (stock.c, defined above this include):
+ *   now_ms() -> monotonic ms (GetTickCount64)
+ *   sock_timeo(sd, ms) -> SO_RCVTIMEO/SO_SNDTIMEO; ms==0 clears both
+ *   ss_set_ka is implemented HERE and called by the host file  */
 extern int ws_put(void *, const unsigned char *, int);
 extern int ws_get(void *, unsigned char *, int *, int);
-extern int sock_connect(const char *, int);   /* target dials are native winsock fds; nonblocking comes from the select()-based drain */
+extern int sock_connect(const char *, int);   /* target dials: native winsock fd, BLOCKING (the
+    dial itself is the only non-blocking phase); writes are select()-gated and abandon a wedged
+    channel after the ~30 s write deadline - see docs/stability-invariants.md */
 extern int sock_udp_dial(const char *, int);  /* connected UDP target socket (winsock1 proto 4) */
 extern int tls_buffered(void *);              /* 1 = mbedtls input buffer already holds readable bytes */
 extern void ws_set_nb(void);                  /* enable post-handshake non-blocking outbox sends */
@@ -785,8 +798,23 @@ static int auth_read(void *ctx)
 	for(;;){
 		if(rx_packet(ctx,&t)) return -1;
 		if(t==52) return 0;           /* userAuthSuccess */
-		if(t==51 || t==3) return 1;    /* failure/unimplemented: next method */
-		if(t==53 || t==60) continue;   /* banner / info request */
+		if(t==51){
+			/* USERAUTH_FAILURE from a Go server.  x/crypto marshals this with the field
+			   order of userAuthFailureMsg{ Methods []string; PartialSuccess bool }, so on
+			   the wire the name-list comes FIRST and the boolean SECOND - the reverse of
+			   RFC 4252 §5.1 (Go peers agree with each other, so only a non-Go client
+			   notices; measured against chisel 1.12.1: 51 | 00 00 00 08 | "password" | 00).
+			   Worth logging: it is how you tell "this server has --auth set" from one that
+			   would have accepted us. */
+			char methods[80]; int cnt=0, partial=0;
+			rp=1;
+			if(rd_nl(methods,(int)sizeof methods,&cnt)==0){
+				partial=(rp<rn)?(int)rpl[rp]:0;
+				SLOG("auth failure: methods=[%s] count=%d partial=%d",methods,cnt,partial);
+			} else SLOG("auth failure: no method list (rn=%d)",(int)rn);
+			return 1; }
+		if(t==3) return 1;            /* unimplemented: try the next method */
+		if(t==53 || t==60) continue;  /* banner / info request */
 		SLOG("auth: unexpected msg %d",t);
 		return -1;
 	}
@@ -1212,11 +1240,51 @@ static int handle_data(void *ctx)
  *  channel close (97), or on a refusal (92); the SSH session then keeps
  *  serving further connections.  Bounded self pings keep the pump cycling
  *  between peer packets while a target is still answering. ---- */
+/* ---- chisel keepalive (this side pings too) ----
+ * The Go tunnel runs the same keepAliveLoop on BOTH ends (share/tunnel/tunnel.go
+ * BindSSH -> keepAliveLoop), so a chisel client sends an SSH global request named
+ * "ping" with want-reply every --keepalive (default 25s) and requires the reply
+ * (81, raw body "pong" - handleSSHRequests does r.Reply(true, []byte("pong"))) within
+ * PING_TIMEOUT, which defaults to the keepalive interval.  On timeout it logs
+ * "ping failed" and closes the SSH connection.
+ *
+ * Without our own pings the payload only learns that a transport is dead when the
+ * SERVER pings it - which needs the server to be alive.  A black-holed path (front-end
+ * idle drop, NAT state expiry, sleep/wake, a server host that vanished without an RST)
+ * produces no readable bytes and no error, so the pump would sit in its 1 s select
+ * forever and the SOCKS port would stay "bound" over a dead tunnel.  The interval, not
+ * per-spin frequency, is what keeps this cheap: a per-spin ping floods the server's
+ * request mux (measured: sessions were closing every ~27 s at that rate).
+ *
+ * ka_ms == 0 disables our pings (chisel's --keepalive 0s).  ka_to_ms defaults to ka_ms. */
+static unsigned long long ka_ms = 25000, ka_to_ms = 25000;
+static unsigned long long ka_deadline = 0;
+static int ka_wait = 0;               /* a ping is outstanding, awaiting its 81 */
+void ss_set_ka(unsigned long long ping_ms, unsigned long long pong_ms)
+{
+    ka_ms = ping_ms;
+    ka_to_ms = pong_ms ? pong_ms : (ping_ms ? ping_ms : 0);
+}
+
 #define POLL_MAX 2048
 static int ss_pump(void *ctx)
 {
  int spins=0,i,lp_n=0;
+ if(ka_ms) ka_deadline = now_ms() + ka_ms;
  for(;;){
+  /* keepalive: answer the deadline before anything else, so the check runs even when
+     no peer byte ever arrives (that is exactly the failure this detects). */
+  if(ka_ms){
+    unsigned long long n=now_ms();
+    if(ka_wait){
+      if(n>=ka_deadline){ SLOG("ka: no pong within %u ms: ending session",(unsigned)ka_to_ms); return -1; }
+    } else if(n>=ka_deadline){
+      pn=0; w_u8(80); w_str("ping"); w_bool(1);
+      if(pk_send(ctx)){ SLOG("ka: ping send failed"); return -1; }
+      ka_wait=1; ka_deadline = n + ka_to_ms;
+      SLOG("ka: ping sent, reply due in %u ms",(unsigned)ka_to_ms);
+    }
+  }
   /* Wake on peer data OR on any dialed target fd becoming readable.  Never
      enter pk_recv unless the TLS layer actually holds bytes (kernel fd
      readable, or the mbedtls input buffer is non-empty): a silent keep-alive
@@ -1258,7 +1326,23 @@ static int ss_pump(void *ctx)
     else if(t==2||t==3||t==4){ spins=0; }
     else if(t==1){ DM(9014); SLOG("peer disconnect"); for(i=0;i<CH_N;i++) if(chs[i].used) ch_drop(chs+i); return 0; }
     else if(t==80){ { rp=1; { const char *nm=rd_str(); uint8_t wr=(rp<rn)?rpl[rp++]:0; SLOG("ping rx nm=%s wr=%d lp=%d",nm?nm:"(fail)",(int)wr,lp_n); if(nm&&teq(nm,"ping")){ DM(9010); if(wr){ pn=0; w_u8(81); w_raw("pong",4); if(pk_send(ctx)){ DM(9016); return -1; } } DM(9020); } } } spins=0; }
-    else if(t==81){ }
+    else if(t==81){
+      /* REQUEST_SUCCESS: the reply to our keepalive ping.  chisel's server answers with
+         the raw payload "pong" (Request.Reply(true, []byte("pong")) - NOT a length-prefixed
+         string), and Go's own keepAlivePing accepts an empty body or exactly "pong";
+         anything else is a "strange ping response" and ends the session there too. */
+      if(ka_wait){ int bl=(int)rn-1; const char *b=(bl>0)?(const char*)(rpl+1):0;
+        if(bl==0) { SLOG("ka: pong (empty reply)"); }
+        else if(bl==4 && teqp(b,"pong",4)) { SLOG("ka: pong"); }
+        else { SLOG("ka: strange ping response (%d bytes): ending session",bl); return -1; }
+        ka_wait=0; ka_deadline = now_ms() + ka_ms; }
+      }
+    else if(t==82){
+      /* REQUEST_FAILURE to a global request of ours: the peer does not implement "ping",
+         which is a keepalive failure (Go's SendRequest returns the remote error and
+         keepAliveLoop closes). */
+      if(ka_wait){ const char *m; rp=1; m=rd_str(); SLOG("ka: peer refused ping (%s): ending session",m?m:"no message"); return -1; }
+      }
     else if(t==93){ rp=1; { uint32_t id=rd_u32(), add=rd_u32(); { struct channel *c=ch_get(id); if((lp_n&63)==0) SLOG("rx93 id=%u add=%u c=%d win=%u",id,add,c?1:0,c?(unsigned)c->win:0u); if(c) c->win+=add; } } }
     else if(t==90){ DM(9012); if(handle_open(ctx)){ DM(9017); SLOG("pump: handle_open fail"); return -1; } }
     else if(t==94){ if(handle_data(ctx)){ DM(9017); SLOG("pump: handle_data fail"); return -1; } }
@@ -1278,13 +1362,11 @@ static int ss_pump(void *ctx)
     if(!chan_seen){ SLOG("pump: no channels yet, keep polling"); }
     else { SLOG("pump: channels closed, awaiting next tunnel open"); }
    }
-  /* long-lived client: we NEVER send unsolicited pings. Stock 1.12.0
-     servers ack every request (handleSSHRequests "ping"->pong), so a
-     per-spin ping floods ping->ack->ping and the server mux dies at
-     ~25s (sessions Close every 27.2s with no wire error). The REAL
-     client only ever replies pong to the server's 25s ticker pings -
-     do exactly that above (t==80 branch), and let pk_recv errors
-     surface real transport death. */
+  /* Three ways this loop learns the transport died: pk_recv errors, the peer closing
+     cleanly (handled above), and our own keepalive ping timing out (the ka block at the
+     top of the loop).  Pings go out on the configured interval, never per spin: a
+     per-spin ping floods the server's request mux (measured: sessions closed every
+     ~27.2 s with no wire error). */
   spins++;
   }
  }
@@ -1299,17 +1381,23 @@ static void ss_reset(void)
 	for(i=0;i<CH_N;i++){ chs[i].used=0; chs[i].fd=-1; chs[i].stage=0; chs[i].sbn=0; chs[i].pendn=0; }
 	chan_seen=0;
 	st_w=0; st_r=0; seq_w=0; seq_r=0;
+	ka_wait=0; ka_deadline=0;
 	/* wire buffers stay: the WS upgrade read may already hold the accept line */
 }
 
-/* ---- entry: handshake -> auth -> config -> pump (R:socks remote) ---- */
-int ss_run(void *ctx,const char *id,const char *pass,int lport,int fd,int ubind,const char *urehost,int ureport)
+/* ---- entry: handshake -> auth -> config -> pump (R:socks remote) ----
+ * `user`/`pass` are chisel's --auth credentials: the chisel server checks them in its
+ * SSH PasswordCallback (server/server.go authUser), which is also how it looks up the
+ * per-user remote-address allow list from --authfile.  Returns -2 when userauth is
+ * rejected, so the caller can tell a credential problem from a transport problem. */
+int ss_run(void *ctx,const char *id,const char *user,const char *pass,int lport,int fd,int ubind,const char *urehost,int ureport)
 {
  tls_fd=fd;
  ss_reset();
  if(ss_handshake(ctx)){ SLOG("stage handshake failed"); return -1; }
- if(ss_auth(ctx,"",pass)){ SLOG("stage auth failed"); return -1; }
+ if(ss_auth(ctx,user,pass)){ SLOG("stage auth failed user=%s",(user&&user[0])?user:"(empty)"); return -2; }
  if(ss_config(ctx,id,"127.0.0.1",lport,"",0,ubind,urehost,ureport)){ SLOG("stage config failed"); return -1; }
+ sock_timeo(tls_fd, 0);   /* handshake phase over: the pump drives reads from select() */
  ws_set_nb();   /* post-handshake: non-blocking outbox sends (see pk_send_nb) */
  return ss_pump(ctx);
 }
