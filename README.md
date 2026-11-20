@@ -7,15 +7,16 @@ exactly like the real `chisel client` process. It interoperates byte-for-byte wi
 unmodified chisel server** — proven against the official 1.12.0 binary, both directly and behind a
 public TLS front end.
 
-No binaries are committed and nothing is published (no release, no pushed tag, no remote):
-`build.bat` builds everything from source, including the hash-verified Mbed TLS 3.6.7 static
-library. The annotated tag `v1.12.1-bof` documents the exact bytes every suite in `tests/` was run
-against — `chiselbof.dll`, 21,402,624 bytes,
-`sha256 d71f4a1a4e5aaa2dda83c127024e438f7a25f9ac214ca4f123b72dcf21d427d7`. Your rebuild will **not**
-hash-match it (the PE timestamp, plus the absolute `__FILE__` paths Mbed TLS's debug build embeds,
-depend on where the dependency was unpacked). Check the shape instead: imports `ws2_32.dll`
-(13 winsock names) + `KERNEL32.dll` (`GetTickCount64`), export `go @1`, and zero out-of-image
-absolute slots from `tools/pehl2dir.py --audit` (587/587).
+Nothing binary is committed and **nothing is published**: this tree carries source only — no
+releases, no tags, no binary assets, and none may ever be attached to the repository. `build.bat`
+builds everything from source on your machine, including the hash-verified Mbed TLS 3.6.7 static
+library. The reference build that every suite in `tests/` was run against (mingw-w64 8.1.0,
+msvcrt runtime, 2026-11-20) is 21,402,624 bytes,
+`sha256 d71f4a1a4e5aaa2dda83c127024e438f7a25f9ac214ca4f123b72dcf21d427d7`. Your own build will
+**not** hash-match it (the PE timestamp, plus the absolute `__FILE__` paths that Mbed TLS's debug
+build embeds, depend on where the dependency was unpacked). Check the shape instead: imports
+`ws2_32.dll` (13 winsock names) + `KERNEL32.dll` (`GetTickCount64`), export `go @1`, and zero
+out-of-image absolute slots from `tools/pehl2dir.py --audit` (587/587).
 
 ## Build
 

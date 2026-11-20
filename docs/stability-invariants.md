@@ -101,7 +101,7 @@ Worth knowing before patching anything in the pump:
 - **Every run starts from a clean slate.** `stock_run` resets the credential buffers, the
   target/udp remote, `--hv` and the retry counters at entry: they live in process-lifetime storage,
   and a beacon may call `go()` again in the same injected process. Without the reset, run #2
-  authenticates as run #1 (`Login failed for user "op"` for a command line that passed no `auth`)
+  authenticates as run #1 (`Login failed for user "ops"` for a command line that passed no `auth`)
   and inherits run #1's attempt counter, so a bounded run gives up on its first bad dial.
 - The reconnect attempt counter is **reset once a session has stayed up more than 5 s** (the same
   rule as upstream's `connected = time.Since(t0) > 5*time.Second`), so `--max-retry-count` bounds

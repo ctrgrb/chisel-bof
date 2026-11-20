@@ -157,7 +157,7 @@ func (s *Server) authUser(c ssh.ConnMetadata, password []byte) (*ssh.Permissions
 
 so the client's job is to send a `USERAUTH_REQUEST` with method `password`, the username and the
 password. `ss_run(…, user, pass, …)` does exactly that, and the username is what later shows up
-in the server log (`Open (user=op addr=… remotes=…)`), which is also how `--authfile`'s
+in the server log (`Open (user=ops addr=… remotes=…)`), which is also how `--authfile`'s
 per-user `addr` allow-list is keyed. `--auth <user>:<pass>` is split at the **first** colon —
 the same rule as `settings.ParseAuth` upstream — so a password may contain colons; with no colon
 the payload reports `bad --auth <value> (expected <user>:<pass>)` and returns 7.
@@ -194,7 +194,7 @@ SSH global request `ping` (`wantReply`) every `--keepalive`, and if no `81`/`82`
 within `--ping-timeout` (default: the keepalive interval) it declares the tunnel dead. Measured
 with `tests/wedge_relay.py` (a relay that keeps both sockets open and silently stops forwarding):
 a 3 s keepalive + 2 s ping-timeout ends the session 5-8 s after the path black-holes, the server
-logs `session#N: Close (user=op … duration=8.26s)` **because the client closed it**, and a fresh
+logs `session#N: Close (user=ops … duration=8.26s)` **because the client closed it**, and a fresh
 session was declared and serving 6 MiB byte-exactly ~15 s after the path returned (console twin).
 The shipped PE image, same rig, flags `--keepalive 3s --ping-timeout 2s --ws-timeout 3s
 --ssh-timeout 4s --min-retry-interval 1s --max-retry-interval 3s`: the wedged session is closed by

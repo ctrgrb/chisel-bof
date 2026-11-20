@@ -101,11 +101,15 @@ infrastructure. These groups must not be dropped:
   `__imp_inet_pton` on one toolchain and not the other. Affects only X.509 name-constraint
   IP-prefix checks, never the handshake.
 
-## Reproducing the tagged artifact
+## The reference build, and how to compare your own
 
-Nothing in this tree is published — no release, no pushed tag, no remote — so the reference point
-is the annotated tag's message, not a download. A local rebuild will not hash-match the artifact it
-documents: the PE timestamp differs, and Mbed TLS's debug build embeds the absolute `__FILE__`
-paths of wherever the dependency was unpacked (that is a tens-of-kilobytes difference on its own).
-Compare behaviour instead — `pehl2dir.py --audit` slot counts, the import list, and the suites in
-`tests/`.
+Nothing is published here — no releases, no tags, no binary assets — so there is no download to
+match. The build every measurement in these docs came from (mingw-w64 8.1.0, msvcrt runtime,
+2026-11-20) is 21,402,624 bytes,
+`sha256 d71f4a1a4e5aaa2dda83c127024e438f7a25f9ac214ca4f123b72dcf21d427d7`, and a local rebuild will
+not hash-match it: the PE timestamp differs, and Mbed TLS's debug build embeds the absolute
+`__FILE__` paths of wherever the dependency was unpacked (that is a tens-of-kilobytes difference on
+its own). Compare behaviour instead — `pehl2dir.py --audit` slot counts, the import list, and the
+suites in `tests/`. A different toolchain is expected to produce a different size: winlibs GCC
+16.2.0 (posix-seh, UCRT) gives 21,433,856 bytes with the same 13+1 imports, 581/581 slots and the
+same suite results.

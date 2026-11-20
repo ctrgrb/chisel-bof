@@ -98,21 +98,21 @@ and no `ka: no pong` teardown on the client.
 The server must run with `--auth` (or `--authfile`) for this to mean anything:
 
 ```
-chisel server --port 8411 --reverse -v --auth "op:s3cr3t:pass" \
+chisel server --port 8411 --reverse -v --auth "ops:pa:ss" \
               --tls-cert cert.pem --tls-key key.pem
 ```
 
 | client invocation | expected client | expected server log |
 |---|---|---|
 | no `--auth` | twin: `auth failure: methods=[password] count=1 partial=0`, `stage auth failed user=` (empty), `ss_run rc=-2`, then the `session died at SSH userauth: …` hint and backoff | `Login failed for user ""`, no `Open` |
-| `--auth op:wrong` | same, with `user=op` | `Login failed for user "op"` |
-| `--auth "op:s3cr3t:pass"` | session opens; `Open (user=op …)`; fetches byte-exact | `session#N: Open (user=op addr=… remotes=…)` + `tun: Bound proxies` |
-| `--auth op` (no colon) | `bad --auth op (expected <user>:<pass>)`, exit 7, no dial | nothing |
+| `--auth ops:wrong` | same, with `user=ops` | `Login failed for user "ops"` |
+| `--auth "ops:pa:ss"` | session opens; `Open (user=ops …)`; fetches byte-exact | `session#N: Open (user=ops addr=… remotes=…)` + `tun: Bound proxies` |
+| `--auth ops` (no colon) | `bad --auth ops (expected <user>:<pass>)`, exit 7, no dial | nothing |
 | more than 24 packed `z` records (PE image only) | `go()` returns 6; `stock_run` never starts, so there is no dial | nothing at all |
 
 The colon-in-password row is the one to keep: `settings.ParseAuth` splits at the **first**
-colon, so `s3cr3t:pass` is one password. A build that split at the last colon logs
-`Login failed for user "op"` with the credentials looking correct.
+colon, so `pa:ss` is one password. A build that split at the last colon logs
+`Login failed for user "ops"` with the credentials looking correct.
 
 `ss_run` returning `-2` means *the transport worked and the credential did not* — it is the
 difference between "fix the password" and "fix the network", and it only shows up in the twin
@@ -140,17 +140,17 @@ times out at the TCP layer, so the only signal is the missing `pong`:
 # client machine
 python tests\wedge_relay.py 8412 127.0.0.1 8411 C:\tmp\_hole.on
 build\pebdrv.exe build\chiselbof.dll https://127.0.0.1:8412 "R:1080:socks" ^
-    --auth op:s3cr3t:pass --keepalive 3s --ping-timeout 2s --ws-timeout 3s
+    --auth ops:pa:ss --keepalive 3s --ping-timeout 2s --ws-timeout 3s
 curl -x socks5h://127.0.0.1:1080 -o NUL -w "%{http_code}\n" http://127.0.0.1:9006/big.bin   # 200 first
 echo. > C:\tmp\_hole.on && timeout /t 8 >nul && del C:\tmp\_hole.on
 ```
 
-Expected on the **server**: `session#N: Close (user=op … duration=8.26s)` written while the
+Expected on the **server**: `session#N: Close (user=ops … duration=8.26s)` written while the
 relay was still holding both sockets open — i.e. the *client* ended it — then
-`session#M: Open (user=op …)` for the redial, and byte-exact fetches through the same socks
+`session#M: Open (user=ops …)` for the redial, and byte-exact fetches through the same socks
 port again. Measured on this build with `--keepalive 3s --ping-timeout 2s --ws-timeout 3s
 --ssh-timeout 4s --min-retry-interval 1s --max-retry-interval 3s`: the hole opened ~7 s after the
-session opened, the client tore the wedged session down **~4 s** later (`Close (user=op …
+session opened, the client tore the wedged session down **~4 s** later (`Close (user=ops …
 duration=11.6042139s)`), exactly **2** redial attempts reached the server during the 14 s the hole
 was up (each attempt costs its phase deadline plus a backoff wait — that count *is* the backoff
 working; a build whose sleep is fake redials continuously), and the first byte-exact 6 MiB fetch

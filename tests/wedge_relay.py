@@ -12,7 +12,7 @@ Test shape (client machine, one server with --auth so the session log is readabl
 
     python tests\\wedge_relay.py 8412 127.0.0.1 8411 C:\\tmp\\_hole.on
     build\\pebdrv.exe build\\chiselbof.dll https://127.0.0.1:8412 "R:1080:socks" ^
-        --auth op:s3cr3t --keepalive 3s --ping-timeout 2s --ws-timeout 3s
+        --auth ops:pa:ss --keepalive 3s --ping-timeout 2s --ws-timeout 3s
     curl -x socks5h://127.0.0.1:1080 -o NUL -w "%%{http_code}\\n" http://127.0.0.1:9006/big.bin
     echo. > C:\\tmp\\_hole.on          # black-hole: forwards stop, sockets stay open
     ... wait 8 s ...
@@ -20,7 +20,7 @@ Test shape (client machine, one server with --auth so the session log is readabl
 
 Expected, with the flags above (the twin build shows the same thing as marks):
 the client ends the wedged session 5-8 s after the hole appears - the server log shows
-`session#N: Close (user=op ... duration=8.26s)` while nothing on the *network* broke -
+`session#N: Close (user=ops ... duration=8.26s)` while nothing on the *network* broke -
 then `retry: ...` attempts bounded by --ws-timeout while the hole is still up, a fresh
 `session#M: Open` once the flag is gone, and byte-exact fetches through the same socks
 port again.  Run the same test with `--keepalive 0` as the control: the client never
