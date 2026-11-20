@@ -22,18 +22,34 @@ threads, no fibre scheduling — unlike the Go client).
 - `go(const char *args, int len)` unpacks the beacon's records itself (`pe_args` in
   `src/stock.c`): it accepts the Cobalt-Strike form (leading `u32` = size of the remainder) and
   the Outflank form (leading `u32` = total including the header), falling back to the other if the
-  first does not match. At most `PE_MAXARG` = **24** records, each truncated to 512 characters.
-  Records are copied **by length, never by NUL**: a `z` record carries its own terminator inside
-  `l` but a `b` record does not, and a record without one would otherwise read into the next.
+  first does not match. At most `PE_MAXARG` = **24** records, each up to `PE_ARGMAX` = **1024**
+  characters. Records are copied **by length, never by NUL**: a `z` record carries its own
+  terminator inside `l` but a `b` record does not, and a record without one would otherwise read
+  into the next. A record whose shape is UTF-16LE (printable first byte, every odd byte zero —
+  `pe_iswide`) is collapsed to 8-bit on the way in, because a `Z` (wide) argument would otherwise
+  stop at its first NUL byte; the test is per record, so a command line may mix `z` and `Z`.
   Any leftover byte after 24 records means the list was longer than the cap: it returns 6 (then
   `stock_run` never runs) instead of using the prefix. Silently dropping the tail is not an
   option — the tail is where `auth`, the timeouts and the retry flags land.
+- **One record may be the whole command line.** When the buffer yields exactly one record, `go()`
+  hands it to `pe_tokenize`: split on ASCII blanks, `"` toggles grouping and the quote characters
+  are dropped (so a value may contain spaces), tokens written back over the source (never to the
+  right of it). This is the form that makes chisel's dashed spellings reachable from a positional
+  C2 parser — `exec_bof z "https://host R:1080:socks --auth u:p --max-retry-count 5"` — because the
+  payload, not the C2, does the splitting. One record can never be a valid record-form list (chisel
+  needs URL + remote), so the two forms cannot collide. Over 24 tokens or an unterminated quote is
+  a refusal (6), same rule as the record walk.
 - Flag matching (`flagis`) ignores **leading dashes on both sides**, so `--auth`, `-auth` and
   `auth` are one flag and `authx` is none of them. That exists for CLIs that pack arguments
   positionally (`exec_bof <types><args>`): their own option parser claims any token starting with
-  `-`, so a dashed flag can never arrive. `tests/packedargs.py` drives `go()` with hand-built
-  buffers (both header forms, `z` and `b` records, the cap boundary) and asserts on the return
-  code, which is the only observable an offline test has here.
+  `-`, so a dashed flag can never arrive — in the record form. `tests/packedargs.py` drives `go()`
+  with hand-built buffers (both header forms, `z`, `b` and wide records, the single-record form,
+  the cap boundary) and asserts on the return code and, for the retry flags, on the **elapsed
+  wall**: a `waiting 2000 ms` line proves nothing on its own.
+- Per-run state is reset at the top of `stock_run` (credentials, `--tgt`/udp remote, `--hv`, the
+  retry counters and intervals, the dial deadline). Those buffers are process-lifetime storage and
+  a beacon may call `go()` several times in one injected process; without the reset, run #2 would
+  authenticate with run #1's username and start with run #1's attempt count already spent.
 - Built `-nostdlib -shared -Wl,--dynamicbase -Wl,--strip-all -Wl,--no-undefined`, compile side
   `-fno-pic -fno-pie`.
 - 587 absolute relocation slots (581 on a GCC 16 build), **all of them pointing inside the

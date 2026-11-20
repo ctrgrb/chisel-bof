@@ -149,11 +149,28 @@ Expected on the **server**: `session#N: Close (user=op … duration=8.26s)` writ
 relay was still holding both sockets open — i.e. the *client* ended it — then
 `session#M: Open (user=op …)` for the redial, and byte-exact fetches through the same socks
 port again. Measured on this build with `--keepalive 3s --ping-timeout 2s --ws-timeout 3s
---ssh-timeout 4s --min-retry-interval 1s --max-retry-interval 3s`: teardown 5-8 s after the hole
-appears, `Close (user=op … duration=11.323723s)` on the wedged session, a fresh `Open` **3 s**
-later, and byte-exact 6 MiB fetches **8 s** after the flag file was deleted — the attempts in
-between are bounded by `--ws-timeout`/`--ssh-timeout` + the backoff wait, so the worst case is
-attempts × (deadline + wait).
+--ssh-timeout 4s --min-retry-interval 1s --max-retry-interval 3s`: the hole opened ~7 s after the
+session opened, the client tore the wedged session down **~4 s** later (`Close (user=op …
+duration=11.6042139s)`), exactly **2** redial attempts reached the server during the 14 s the hole
+was up (each attempt costs its phase deadline plus a backoff wait — that count *is* the backoff
+working; a build whose sleep is fake redials continuously), and the first byte-exact 6 MiB fetch
+succeeded **5 s** after the flag file was removed.
+
+Give-up windows, measured with the twin (exit code propagates there; `pebdrv` does not) against a
+closed port, a TLS peer that answers `502` (`gotest/fake502.py 8416 <cert> <key> 502`) and a peer
+that accepts TCP and says nothing (`gotest/fakepeer.exe 8417 silent`):
+
+| flags | wall |
+|---|---|
+| `max-retry-count 5 min-retry-interval 2s max-retry-interval 2s connect-timeout 1s`, closed port | 13 s |
+| same without `connect-timeout` (8 s default), closed port | 49 s |
+| `max-retry-count 3 min/max 2s connect-timeout 3s ws-timeout 3s ssh-timeout 3s`, `502` front end | 4 s |
+| `max-retry-count 4 min/max 1s` and every timeout `1s`, TLS never answers | 7 s |
+| `max-retry-count 0` | never: unlimited retries, the redial rate bounded by the backoff |
+
+Timing these needs `$SECONDS` (or the twin's own phase marks): the *printed* `waiting N ms` is not
+proof, and a build that slept through the Winsock NULL-set `select` idiom redialled instantly while
+printing exactly the same lines.
 
 **The flag list is itself a test on the PE image** (the twin takes real `argv` and never hits
 this): pack 24 `z` records and the session opens; pack 26 or 44 and `go()` returns 6 — count
@@ -186,9 +203,22 @@ pin the whole unpacker:
 | 24 records (at the cap) | runs: `1` |
 | 26 records (over the cap) | `6` immediately, and **no** connection to the port at all |
 | `keepalive 99zz` | `7` — the dash-free name reached the duration parser |
+| **one** record holding `url remote max-retry-count 1 connect-timeout 1s` | `1` — the payload tokenized it |
+| one record holding the same line **with dashes** (`--max-retry-count 1 --connect-timeout 1s`) | `1` — dashes are legal in this form |
+| one record, `keepalive "99 zz"` (quoted, one value with a space) | `7`; unquoted `keepalive 99 zz` (two tokens) → `1` |
+| one record, unterminated quote | `6` |
+| one record, 25 tokens | `6` (the same cap, counted in tokens) |
+| one `Z` record (UTF-16LE) holding the command line, **no** bounds | still running when the 15 s watchdog fires = unlimited retries, i.e. it decoded the wide record |
+| `Z` record holding a flag **name**, `z` records for the values | `1` — the wide/narrow test is per record |
+| a second `go()` in the same process, with no flags at all | still running (unbounded): run #2 did not inherit run #1's `max-retry-count` |
+| 3 attempts with `connect-timeout 1s` and `min == max == 1s` | `1` **and ≥ 1.8 s of wall** — the backoff has to consume time, not just print |
 
 Every flag in sections 4 and 5 can be spelled **without its leading dashes** (`auth u:p`,
 `keepalive 3s`, `max-retry-count 1`): positional C2 argument parsers (`exec_bof <types><args>`)
-claim any token that starts with `-`, so the dashed spelling cannot always be delivered. Run the
-dashed and dash-free forms once each — a build whose parser strips dashes on the argument side
-only would accept neither.
+claim any token that starts with `-`, so the dashed spelling cannot always be delivered. The other
+way to deliver a dashed line is **one record holding the whole command line** (row above): the
+payload splits it, so the C2 never sees a token starting with `-`. Run the dashed and dash-free
+forms once each — a build whose parser strips dashes on the argument side only would accept
+neither, and a build whose tokenizer writes its terminator before stepping over the separator would
+stop after the first token. Each case runs under a watchdog: `hang` is a legitimate expected
+outcome (an unbounded retry loop), never a stuck test suite.

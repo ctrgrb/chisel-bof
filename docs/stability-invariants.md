@@ -79,14 +79,34 @@ Worth knowing before patching anything in the pump:
   default — on a stalled handshake whose command line said `--ws-timeout 3s`. Check the boundary
   (24 records → the server logs `Open`; 26 and 44 → no connection at all). Records are copied **by
   length, never by NUL** (a `b`-type record has no terminator, and a `z` record missing one must
-  not eat the next record), and `flagis` matches flag names **with or without leading dashes** —
-  positional C2 parsers (`exec_bof <types><args>`) claim any dashed token for their own options, so
-  the dash-free spelling is the only one that can arrive. `tests/packedargs.py` asserts all of this
-  against `go()`'s return code with no network involved.
+  not eat the next record), each record holds up to `PE_ARGMAX` (1024) characters, and a **wide
+  (`Z`, UTF-16LE) record is collapsed to 8-bit per record by shape** (`pe_iswide`: printable first
+  byte, every odd byte zero) — otherwise the value would end at its first NUL byte.
+  `flagis` matches flag names **with or without leading dashes** — positional C2 parsers
+  (`exec_bof <types><args>`) claim any dashed token for their own options, so in the record form
+  the dash-free spelling is the only one that can arrive. The exception is the **single-record
+  form**: when the buffer holds exactly one record it is a whole command line, split by
+  `pe_tokenize` (blanks separate tokens, `"` groups and the quotes are dropped), and there the
+  dashes are legal because the payload — not the C2 — does the splitting; over 24 tokens or an
+  unterminated quote returns 6. `tests/packedargs.py` asserts all of this against `go()`'s return
+  code with no network involved.
+- **The backoff wait is real, not printed.** `sleep_ms` parks in ≤2 s `select` slices on an
+  unconnected socket it created for the purpose, because Winsock refuses the NULL-set sleep idiom:
+  `select(0,0,0,0,&tv)` returns `WSAEINVAL` immediately, and an empty `fd_set` is rejected the same
+  way (measured with a `-nostdlib` scratch exe against this exact link). A build that "slept" that
+  way printed `waiting 2000 ms` and redialled at once, so every outage became a redial storm spaced
+  only by the phase deadlines. `tests/packedargs.py` asserts the **wall clock**, not the log line.
+  One long `Sleep` is equally wrong: a beacon thread parked for minutes is indistinguishable from a
+  wedged one, and a kill request has to stay responsive.
+- **Every run starts from a clean slate.** `stock_run` resets the credential buffers, the
+  target/udp remote, `--hv` and the retry counters at entry: they live in process-lifetime storage,
+  and a beacon may call `go()` again in the same injected process. Without the reset, run #2
+  authenticates as run #1 (`Login failed for user "op"` for a command line that passed no `auth`)
+  and inherits run #1's attempt counter, so a bounded run gives up on its first bad dial.
 - The reconnect attempt counter is **reset once a session has stayed up more than 5 s** (the same
   rule as upstream's `connected = time.Since(t0) > 5*time.Second`), so `--max-retry-count` bounds
-  a *failed dial burst*, not the lifetime of a working proxy. Backoff waits must sleep in bounded
-  `select` slices (`sleep_ms`), never one long `Sleep`, so a kill request stays responsive.
+  a *failed dial burst*, not the lifetime of a working proxy; `0` and any negative value mean
+  unlimited, because upstream's gate is `MaxRetries > 0`.
 
 ## Session lifetime
 

