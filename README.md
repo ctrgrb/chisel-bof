@@ -14,7 +14,7 @@ Nothing binary is committed here: `build.bat` builds everything from source, inc
 crypto static library (hash-verified fetch of Mbed TLS 3.6.7). The prebuilt payload lives on
 the **[latest release](https://github.com/ctrgrb/chisel-bof/releases/latest)** — currently
 `v1.12.1-bof`, asset `chiselbof.dll`, 21,402,624 bytes,
-`sha256 4787659e9a2e434646d035d06800cbbc9ead916b9acd24d976e754c401f4dbba` (also in the
+`sha256 d71f4a1a4e5aaa2dda83c127024e438f7a25f9ac214ca4f123b72dcf21d427d7` (also in the
 `SHA256SUMS.txt` asset). Your own rebuild will **not** hash-match it: the PE timestamp and
 the absolute `__FILE__` paths that Mbed TLS's debug build embeds depend on where the
 dependency was unpacked. Check the shape instead — imports `ws2_32.dll` (13 winsock names) +
@@ -70,6 +70,10 @@ exec_bof_async  zz  https://chisel.example.com  "R:1080:socks"
 
 In the OST web UI that is the implant's **Execute BOF** task: artifact `chiselbof.dll`,
 entry point `go`, format `zz`, then the URL and the remote.
+
+To add chisel's flags, either pass them as more records with their dashes stripped, or put the
+whole command line in **one** record and keep the dashes — see
+[Parameters](#parameters-chisel-compatible-flags).
 
 Two things that look wrong but are expected:
 
@@ -168,16 +172,20 @@ The payload's own knobs, not chisel's: `--port <p>` (server port, if the URL has
 `--ver <string>` (version reported in the `config` request), `--hv <n>` (KEX version-string
 shape, for handshake experiments).
 
-The BOF-PE entry unpacks at most **24** length-prefixed argument records (`z`, and `b` too —
-records are copied by length, not by NUL), URL + remotes + flags, and a longer list makes `go()`
-return 6 **without running anything** — it does not truncate. That matters with the flags above: a
-truncated list would drop `auth` or the timeouts while the proxy still appeared to work, which is
-exactly the failure this used to have (`SO_RCVTIMEO` measured installed at the 45 s default while
-the command line said `3s`, because the flag sat past the old 8-record cap). `tests/packedargs.py`
-drives `go()` with hand-built buffers — both header forms, `z` and `b` records, the cap boundary —
-and asserts on the return code (1 = flags parsed and the dial budget ran out, 6 = refused, 7 = bad
-duration). The twin build (`-DTWIN_MAIN`, command in [docs/build-problems.md](docs/build-problems.md))
-takes real `argv`, so it never hits the limit — which is why this bug only ever showed in the DLL.
+The BOF-PE entry unpacks at most **24** length-prefixed argument records (`z`, `b`, and `Z` —
+UTF-16LE, collapsed to 8-bit per record by shape), URL + remotes + flags, and a longer list makes
+`go()` return 6 **without running anything** — it does not truncate. Each record holds up to 1024
+characters, which is what lets the whole command line fit in one record (see above). That matters
+with the flags above: a truncated list would drop `auth` or the timeouts while the proxy still
+appeared to work, which is exactly the failure this used to have (`SO_RCVTIMEO` measured installed
+at the 45 s default while the command line said `3s`, because the flag sat past the old 8-record
+cap). `tests/packedargs.py` drives `go()` with hand-built buffers — both header forms, `z`/`b`/`Z`
+records, the single-record command line (dashed, dash-free, quoted, over the token cap), the cap
+boundary, and the **wall clock** of a bounded retry run — 16 cases in total, asserting the return
+code (1 = flags parsed and the dial budget ran out, 6 = refused, 7 = bad duration, a still-running
+case = unlimited retries, which is also how "state did not leak from the previous run" is shown).
+The twin build (`-DTWIN_MAIN`, command in [docs/build-problems.md](docs/build-problems.md)) takes
+real `argv`, so it never hits the limit — which is why this bug only ever showed in the DLL.
 
 To *see* what these knobs are doing — the `ping`/`pong` cadence, which phase timed out, which
 methods the server would accept — build the console twin or a `DIAG_MARK` build:
