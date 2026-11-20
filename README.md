@@ -11,14 +11,15 @@ the official 1.12.0 binary, both directly and behind a public TLS front-end (see
 [Tested deployment](#tested-deployment-public-tls-front-end)).
 
 Nothing binary is committed here: `build.bat` builds everything from source, including the
-crypto static library (hash-verified fetch of Mbed TLS 3.6.7). The prebuilt payload lives on
-the **[latest release](https://github.com/ctrgrb/chisel-bof/releases/latest)** — currently
-`v1.12.1-bof`, asset `chiselbof.dll`, 21,402,624 bytes,
-`sha256 d71f4a1a4e5aaa2dda83c127024e438f7a25f9ac214ca4f123b72dcf21d427d7` (also in the
-`SHA256SUMS.txt` asset). Your own rebuild will **not** hash-match it: the PE timestamp and
-the absolute `__FILE__` paths that Mbed TLS's debug build embeds depend on where the
-dependency was unpacked. Check the shape instead — imports `ws2_32.dll` (13 winsock names) +
-`KERNEL32.dll` (`GetTickCount64`), and zero out-of-image absolute slots from
+crypto static library (hash-verified fetch of Mbed TLS 3.6.7). **This tree publishes nothing** —
+no release, no pushed tag, no remote at all — so what you run is what `build.bat` produces on your
+machine. The bytes the annotated tag `v1.12.1-bof` documents (`chiselbof.dll`, 21,402,624 bytes,
+`sha256 d71f4a1a4e5aaa2dda83c127024e438f7a25f9ac214ca4f123b72dcf21d427d7`) were built from the tree
+at commit `90dc9a8` — the commits after it change documentation only — and they are the bytes every
+suite in `tests/` was run against. Your own rebuild will **not** hash-match them: the PE timestamp
+and the absolute `__FILE__` paths that Mbed TLS's debug build embeds depend on where the dependency
+was unpacked. Check the shape instead — imports `ws2_32.dll` (13 winsock names) +
+`KERNEL32.dll` (`GetTickCount64`), export `go @1`, and zero out-of-image absolute slots from
 `tools/pehl2dir.py --audit` (587/587).
 
 ## Compile

@@ -101,9 +101,11 @@ infrastructure. These groups must not be dropped:
   `__imp_inet_pton` on one toolchain and not the other. Affects only X.509 name-constraint
   IP-prefix checks, never the handshake.
 
-## Reproducing a release artifact
+## Reproducing the tagged artifact
 
-A local rebuild will not hash-match a release asset: the PE timestamp differs, and Mbed TLS's
-debug build embeds the absolute `__FILE__` paths of wherever the dependency was unpacked
-(that is a tens-of-kilobytes difference on its own). Compare behaviour instead —
-`pehl2dir.py --audit` slot counts, the import list, and the suites in `tests/`.
+Nothing in this tree is published — no release, no pushed tag, no remote — so the reference point
+is the annotated tag's message, not a download. A local rebuild will not hash-match the artifact it
+documents: the PE timestamp differs, and Mbed TLS's debug build embeds the absolute `__FILE__`
+paths of wherever the dependency was unpacked (that is a tens-of-kilobytes difference on its own).
+Compare behaviour instead — `pehl2dir.py --audit` slot counts, the import list, and the suites in
+`tests/`.
