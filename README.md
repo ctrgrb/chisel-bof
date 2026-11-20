@@ -8,26 +8,10 @@ unmodified chisel server** — proven against the official 1.12.0 binary, both d
 public TLS front end.
 
 ## Build
-
+Compile with Mingw64. `C:\path\to\mingw64\bin` must be in PATH. Then just run the build script:
 ```
 build.bat                                   :: or: set TOOLCHAIN=C:\path\to\mingw64\bin && build.bat
 ```
-
-Windows x64; mingw-w64 **x86_64** (tested: 8.1.0 msvcrt, winlibs GCC 16.2.0 posix-seh/UCRT);
-`curl` + `tar` + PowerShell to fetch and hash-verify the crypto dependency; Python 3 for the tests.
-On hosts where gcc's `cc1.exe` cannot start standalone, `GDBWRAP=1` (the default when `TOOLCHAIN`
-is set) runs `gcc`/`ar`/`dlltool` under `gdb --batch -ex run --args`; `GDBWRAP=0` calls them
-directly.
-
-Output (all git-ignored): `build/chiselbof.dll` — the payload, what you execute from the beacon;
-`build/pebdrv.exe` — test driver that packs CLI args BOF-style and calls `go()`; `deps/MBED.a` and
-`deps/WS2_32nat.a`. The script wipes every intermediate and verifies `build/build.log` before
-relinking, and refuses to relink over a DLL a running test client still has mapped (`OUTPUT LOCKED`)
-— stale-object traps are in [docs/build-problems.md](docs/build-problems.md).
-
-Build flags are load-bearing — a `-nostdlib` payload depends on pinned compiler behaviour, and every
-pin is explained in [docs/build.md](docs/build.md). Build or link failure, or a payload that loads
-and does nothing: [docs/build-problems.md](docs/build-problems.md).
 
 ## Run
 
