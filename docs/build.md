@@ -103,9 +103,9 @@ infrastructure. These groups must not be dropped:
 
 ## The reference build, and how to compare your own
 
-Nothing is published here — no releases, no tags, no binary assets — so there is no download to
-match. The build every measurement in these docs came from (mingw-w64 8.1.0, msvcrt runtime,
-2026-11-20) is 21,402,624 bytes,
+This repository carries source only — no releases, no tags, no binary assets — so there is no
+download to match. The build every measurement in these docs came from (mingw-w64 8.1.0,
+msvcrt runtime, 2026-11-20) is 21,402,624 bytes,
 `sha256 d71f4a1a4e5aaa2dda83c127024e438f7a25f9ac214ca4f123b72dcf21d427d7`, and a local rebuild will
 not hash-match it: the PE timestamp differs, and Mbed TLS's debug build embeds the absolute
 `__FILE__` paths of wherever the dependency was unpacked (that is a tens-of-kilobytes difference on
