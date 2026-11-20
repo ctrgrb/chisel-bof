@@ -15,8 +15,7 @@ build.bat
 
 ## Run from C2 (tested with OST)
 
-Chisel's flags are ordinary arguments, passed as **one** record holding the whole command line (dashes legal there because the payload splits it;
-`"` groups a value that contains a space):
+Chisel's flags are ordinary arguments, passed as **one** record holding the whole command line:
 Server (behind CDN -> caddy or nginx server -> localhost:8000):
 ```
 chisel server --port 8000 --reverse -v --auth "username:password"
